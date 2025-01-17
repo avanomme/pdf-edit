@@ -18605,115 +18605,105 @@ __export(main_exports, {
 module.exports = __toCommonJS(main_exports);
 var import_obsidian = require("obsidian");
 var pdfjsLib = __toESM(require_pdf());
-var PDF_NOTE_VIEW_TYPE = "pdf-note-view";
+var PDF_NOTE_VIEW_TYPE = "a-pdf-note-viewer";
 var DEFAULT_SETTINGS = {
-  defaultScale: 1
+  defaultScale: 1,
+  debug: false,
+  layout: "top",
+  fitMode: "page",
+  showNotes: true,
+  showPdf: true,
+  theme: "system"
 };
 var PdfNoteView = class extends import_obsidian.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
+    this.pdfContainer = null;
+    this.noteContainer = null;
+    this.currentPdf = null;
     this.currentPage = 1;
     this.currentPdfPath = null;
+    this.pdfScrollTimeout = null;
+    this.isScrolling = false;
+    this.isDarkMode = false;
+    this.currentScale = 1.5;
+    this.textLayer = null;
     this.highlights = /* @__PURE__ */ new Map();
     this.isPdfCollapsed = false;
-    this.pdfScrollTimeout = null;
+    this.selectedHighlightColor = "#ffeb3b";
+    this.isHighlightDeleteMode = false;
+    this.fitToWidthScale = 1;
+    this.currentSaveFolder = null;
     this.plugin = plugin;
-    this.pdfContainer = createDiv();
-    this.noteContainer = createDiv();
+    this.isDarkMode = document.body.classList.contains("theme-dark");
   }
   getViewType() {
     return PDF_NOTE_VIEW_TYPE;
   }
   getDisplayText() {
-    return "PDF Note View";
+    return "A PDF Note Viewer";
   }
   async onOpen() {
-    const container = this.containerEl.children[1];
-    container.empty();
-    container.addClass("pdf-note-container");
-    this.pdfContainer = container.createDiv("pdf-container");
-    this.noteContainer = container.createDiv("note-container");
-    this.createToolbar();
-    this.createFilePickerButton();
-    this.addStyles();
+    try {
+      if (!pdfjsLib.GlobalWorkerOptions.workerSrc) {
+        pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
+      }
+      const container = this.containerEl.children[1];
+      if (!container) {
+        throw new Error("Container element not found");
+      }
+      container.empty();
+      container.addClass("pdf-note-container");
+      this.pdfContainer = container.createDiv({ cls: "pdf-container" });
+      this.noteContainer = container.createDiv({ cls: "note-container" });
+      this.createFilePickerButton();
+      this.addStyles();
+      this.updateLayout();
+      this.registerEvent(
+        this.app.workspace.on("css-change", () => {
+          const newDarkMode = document.body.classList.contains("theme-dark");
+          if (this.isDarkMode !== newDarkMode) {
+            this.isDarkMode = newDarkMode;
+            if (this.currentPdf) {
+              this.renderPage(this.currentPage, false).catch(console.error);
+            }
+          }
+        })
+      );
+      this.updateVisibility();
+    } catch (error) {
+      console.error("Error in onOpen:", error);
+      new import_obsidian.Notice("Error initializing view: " + error.message);
+    }
   }
-  addStyles() {
-    const styleEl = document.head.createEl("style");
-    styleEl.textContent = `
-      .pdf-note-container {
-        display: flex;
-        height: 100%;
-      }
-      .pdf-container {
-        flex: 1;
-        overflow: auto;
-        border-right: 1px solid var(--background-modifier-border);
-      }
-      .note-container {
-        flex: 1;
-        overflow: auto;
-        padding: 1rem;
-      }
-      .pdf-toolbar {
-        display: flex;
-        gap: 0.5rem;
-        padding: 0.5rem;
-        border-bottom: 1px solid var(--background-modifier-border);
-      }
-      .pdf-nav-button {
-        padding: 0.25rem 0.5rem;
-      }
-      .pdf-page-display {
-        padding: 0.25rem 0.5rem;
-      }
-      .pdf-collapse-button {
-        padding: 0.25rem 0.5rem;
-      }
-      .pdf-container.collapsed {
-        flex: 0;
-        width: 0;
-        overflow: hidden;
-      }
-      .pdf-picker-container {
-        display: flex;
-        justify-content: center;
-        padding: 1rem;
-      }
-    `;
-  }
-  setupResizer() {
+  updateLayout() {
     var _a;
     const container = (_a = this.containerEl) == null ? void 0 : _a.children[1];
     if (!container)
       return;
-    const pdfContainer = this.pdfContainer;
-    const noteContainer = this.noteContainer;
-    let isResizing = false;
-    let startX = 0;
-    let startWidth = 0;
-    const resizer = container.createDiv("resizer");
-    resizer.addEventListener("mousedown", initResize);
-    function initResize(e) {
-      isResizing = true;
-      startX = e.clientX;
-      startWidth = pdfContainer.offsetWidth;
-      document.addEventListener("mousemove", resize);
-      document.addEventListener("mouseup", stopResize);
+    container.removeClass(
+      "layout-top",
+      "layout-bottom",
+      "layout-left",
+      "layout-right"
+    );
+    container.addClass(`layout-${this.plugin.settings.layout}`);
+    if (this.pdfContainer && this.noteContainer) {
+      this.pdfContainer.style.flex = "1";
+      this.pdfContainer.style.width = "";
+      this.pdfContainer.style.height = "";
+      this.noteContainer.style.flex = "1";
+      this.noteContainer.style.width = "";
+      this.noteContainer.style.height = "";
     }
-    function resize(e) {
-      if (!isResizing)
-        return;
-      const width = startWidth + (e.clientX - startX);
-      pdfContainer.style.width = width + "px";
-    }
-    function stopResize() {
-      isResizing = false;
-      document.removeEventListener("mousemove", resize);
-      document.removeEventListener("mouseup", stopResize);
-    }
+    this.setupResizer();
   }
   createFilePickerButton() {
-    const buttonContainer = this.pdfContainer.createDiv("pdf-picker-container");
+    if (!this.pdfContainer)
+      return;
+    const buttonContainer = this.pdfContainer.createDiv({
+      cls: "pdf-picker-container"
+    });
     const button = buttonContainer.createEl("button", {
       text: "Select PDF",
       cls: "mod-cta"
@@ -18721,6 +18711,254 @@ var PdfNoteView = class extends import_obsidian.ItemView {
     button.onclick = async () => {
       await this.selectAndLoadPdf();
     };
+  }
+  addStyles() {
+    const style = document.createElement("style");
+    style.textContent = `
+      .pdf-note-container {
+        display: flex;
+        height: 100%;
+        width: 100%;
+        position: relative;
+      }
+      .pdf-note-container.layout-left {
+        flex-direction: row;
+      }
+      .pdf-note-container.layout-right {
+        flex-direction: row-reverse;
+      }
+      .pdf-note-container.layout-top {
+        flex-direction: column;
+      }
+      .pdf-note-container.layout-bottom {
+        flex-direction: column-reverse;
+      }
+      .pdf-container {
+        flex: 1;
+        overflow: auto;
+        padding: 20px;
+        position: relative;
+        min-height: 200px;
+        min-width: 200px;
+      }
+      .note-container {
+        flex: 1;
+        overflow: auto;
+        padding: 20px;
+        border: 1px solid var(--background-modifier-border);
+        min-height: 200px;
+        min-width: 200px;
+      }
+      .resizer {
+        position: absolute;
+        z-index: 100;
+        background: var(--background-modifier-border);
+        opacity: 0.6;
+        transition: opacity 0.2s;
+      }
+      .resizer:hover {
+        opacity: 1;
+      }
+      .resizer.vertical {
+        cursor: col-resize;
+        width: 4px;
+        height: 100%;
+      }
+      .resizer.horizontal {
+        cursor: row-resize;
+        height: 4px;
+        width: 100%;
+      }
+      .note-navigation {
+        display: flex;
+        justify-content: space-between;
+        margin-bottom: 1em;
+        padding-bottom: 0.5em;
+        border-bottom: 1px solid var(--background-modifier-border);
+      }
+      .note-navigation a {
+        color: var(--text-accent);
+        cursor: pointer;
+      }
+      .note-navigation a:hover {
+        text-decoration: underline;
+      }
+      .pdf-page-container {
+        margin-bottom: 20px;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+      }
+      .pdf-canvas-container {
+        position: relative;
+      }
+      .pdf-loading {
+        padding: 20px;
+        text-align: center;
+      }
+      .pdf-error {
+        padding: 20px;
+        color: var(--text-error);
+        text-align: center;
+      }
+      .pdf-picker-container {
+        text-align: center;
+        padding: 20px;
+      }
+      .pdf-controls {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 10px;
+        background: var(--background-secondary);
+        border-radius: 4px;
+        margin-bottom: 10px;
+        width: 100%;
+        box-sizing: border-box;
+      }
+      .pdf-controls-group {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+      .pdf-zoom-button {
+        min-width: 30px;
+        height: 30px;
+        padding: 0 8px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 4px;
+        background: var(--interactive-normal);
+        color: var(--text-normal);
+        font-size: 14px;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      .pdf-zoom-button:hover {
+        background: var(--interactive-hover);
+      }
+      .pdf-zoom-display {
+        min-width: 60px;
+        text-align: center;
+      }
+      .pdf-page-number input {
+        width: 50px;
+        text-align: center;
+      }
+      .theme-dark .pdf-canvas-container canvas {
+        filter: invert(1) hue-rotate(180deg);
+      }
+      .pdf-page-number {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+      }
+      .note-page-header {
+        font-size: 1.5em;
+        margin-bottom: 1em;
+        border-bottom: 1px solid var(--background-modifier-border);
+        padding-bottom: 0.5em;
+      }
+      .note-content {
+        width: 100%;
+        height: calc(100% - 4em);
+        resize: none;
+        border: none;
+        background: transparent;
+        font-family: inherit;
+        padding: 1em;
+      }
+      .pdf-layout-select,
+      .pdf-fit-mode {
+        min-width: 100px;
+        max-width: 150px;
+      }
+      @media (max-width: 800px) {
+        .pdf-controls {
+          flex-direction: column;
+          align-items: stretch;
+        }
+        
+        .pdf-controls-group {
+          justify-content: center;
+        }
+      }
+      .pdf-toggle-button {
+        padding: 4px 8px;
+        border-radius: 4px;
+        background: var(--interactive-normal);
+        color: var(--text-normal);
+        font-size: 12px;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      .pdf-toggle-button:hover {
+        background: var(--interactive-hover);
+      }
+      .pdf-controls {
+        position: sticky;
+        top: 0;
+        z-index: 100;
+        background: var(--background-secondary);
+      }
+    `;
+    document.head.appendChild(style);
+  }
+  setupResizer() {
+    const container = this.containerEl.children[1];
+    if (!container || !this.pdfContainer || !this.noteContainer)
+      return;
+    const existingResizer = container.querySelector(".resizer");
+    if (existingResizer)
+      existingResizer.remove();
+    const resizer = container.createDiv({ cls: "resizer" });
+    const isHorizontal = ["top", "bottom"].includes(
+      this.plugin.settings.layout
+    );
+    resizer.addClass(isHorizontal ? "horizontal" : "vertical");
+    if (this.plugin.settings.layout === "left" || this.plugin.settings.layout === "right") {
+      resizer.style.left = "50%";
+      resizer.style.transform = "translateX(-50%)";
+    } else {
+      resizer.style.top = "50%";
+      resizer.style.transform = "translateY(-50%)";
+    }
+    let startPos = 0;
+    let startSize = 0;
+    const startResize = (e) => {
+      if (!this.pdfContainer || !this.noteContainer)
+        return;
+      startPos = isHorizontal ? e.clientY : e.clientX;
+      startSize = isHorizontal ? this.pdfContainer.getBoundingClientRect().height : this.pdfContainer.getBoundingClientRect().width;
+      document.addEventListener("mousemove", resize);
+      document.addEventListener("mouseup", stopResize);
+    };
+    const resize = (e) => {
+      if (!this.pdfContainer || !this.noteContainer)
+        return;
+      const currentPos = isHorizontal ? e.clientY : e.clientX;
+      const diff = currentPos - startPos;
+      const newSize = startSize + (this.plugin.settings.layout === "right" || this.plugin.settings.layout === "bottom" ? -diff : diff);
+      const containerSize = isHorizontal ? container.clientHeight : container.clientWidth;
+      const minSize = 200;
+      const maxSize = containerSize - minSize;
+      const clampedSize = Math.min(Math.max(newSize, minSize), maxSize);
+      if (isHorizontal) {
+        this.pdfContainer.style.flex = "none";
+        this.pdfContainer.style.height = `${clampedSize}px`;
+        this.noteContainer.style.flex = "1";
+      } else {
+        this.pdfContainer.style.flex = "none";
+        this.pdfContainer.style.width = `${clampedSize}px`;
+        this.noteContainer.style.flex = "1";
+      }
+    };
+    const stopResize = () => {
+      document.removeEventListener("mousemove", resize);
+      document.removeEventListener("mouseup", stopResize);
+    };
+    resizer.addEventListener("mousedown", startResize);
   }
   async selectAndLoadPdf() {
     const pdfFiles = this.app.vault.getFiles().filter((file) => file.extension === "pdf");
@@ -18739,234 +18977,639 @@ var PdfNoteView = class extends import_obsidian.ItemView {
   }
   async loadPdfFromVault(file) {
     try {
-      const adapter = this.app.vault.adapter;
-      const pdfPath = adapter.getFullPath(file.path);
       this.currentPdfPath = file.path;
       const arrayBuffer = await this.app.vault.readBinary(file);
-      await this.loadHighlights();
       await this.loadPdf(arrayBuffer);
-      await this.initializeNotesFile(file);
     } catch (error) {
       console.error("Error loading PDF from vault:", error);
-      new import_obsidian.Notice("Error loading PDF file");
+      new import_obsidian.Notice("Error loading PDF file: " + error.message);
     }
   }
   async loadPdf(file) {
     try {
+      if (!this.pdfContainer)
+        return;
+      this.pdfContainer.empty();
+      this.currentPdf = null;
+      const loadingEl = this.pdfContainer.createDiv("pdf-loading");
+      loadingEl.setText("Loading PDF...");
       const loadingTask = pdfjsLib.getDocument(file);
       this.currentPdf = await loadingTask.promise;
-      this.pdfContainer.empty();
-      this.createToolbar();
-      await this.renderPage(1);
+      loadingEl.remove();
+      if (this.currentPdf) {
+        await this.renderPage(1);
+      }
     } catch (error) {
       console.error("Error loading PDF:", error);
+      new import_obsidian.Notice("Error loading PDF: " + error.message);
+      this.currentPdf = null;
+      if (this.pdfContainer) {
+        this.pdfContainer.empty();
+        const errorEl = this.pdfContainer.createDiv("pdf-error");
+        errorEl.setText("Failed to load PDF. Please try again.");
+      }
     }
   }
-  async renderPage(pageNumber, scrollIntoView = true) {
-    if (!this.currentPdf || !this.pdfContainer)
+  async renderPage(pageNumber, scrollToTop = true) {
+    if (!this.currentPdf || !this.pdfContainer) {
+      console.error("No PDF loaded or container not found");
       return;
+    }
     try {
       const page = await this.currentPdf.getPage(pageNumber);
-      const viewport = page.getViewport({
-        scale: this.plugin.settings.defaultScale
-      });
+      if (!page) {
+        throw new Error("Failed to get page");
+      }
+      if (pageNumber === 1) {
+        this.currentScale = this.calculateFitScale(page);
+      }
+      const viewport = page.getViewport({ scale: this.currentScale });
+      this.pdfContainer.empty();
+      this.createPdfControls();
+      const pageContainer = document.createElement("div");
+      pageContainer.className = "pdf-page-container";
+      pageContainer.style.width = `${viewport.width}px`;
+      pageContainer.style.height = `${viewport.height}px`;
+      const canvasContainer = document.createElement("div");
+      canvasContainer.className = "pdf-canvas-container";
+      canvasContainer.setAttribute("data-page", pageNumber.toString());
       const canvas = document.createElement("canvas");
       const context = canvas.getContext("2d");
-      if (!context)
-        return;
+      if (!context) {
+        throw new Error("Could not get canvas context");
+      }
       canvas.height = viewport.height;
       canvas.width = viewport.width;
+      if (this.isDarkMode) {
+        context.fillStyle = getComputedStyle(document.body).getPropertyValue(
+          "--background-primary"
+        );
+        context.fillRect(0, 0, canvas.width, canvas.height);
+      }
       const renderContext = {
         canvasContext: context,
         viewport
       };
       await page.render(renderContext).promise;
-      this.pdfContainer.empty();
-      this.pdfContainer.appendChild(canvas);
+      canvasContainer.appendChild(canvas);
+      pageContainer.appendChild(canvasContainer);
+      this.pdfContainer.appendChild(pageContainer);
       this.currentPage = pageNumber;
-      await this.updateNote(pageNumber);
-      if (scrollIntoView) {
-        canvas.scrollIntoView({ behavior: "smooth" });
+      this.updateNoteSection(pageNumber);
+      if (scrollToTop) {
+        this.pdfContainer.scrollTo(0, 0);
+      }
+      if (this.isDarkMode) {
+        canvas.style.filter = "invert(1) hue-rotate(180deg)";
       }
     } catch (error) {
       console.error("Error rendering page:", error);
+      new import_obsidian.Notice("Error rendering page: " + error.message);
     }
   }
-  async initializeNotesFile(pdfFile) {
-    var _a;
-    const notesFileName = `${pdfFile.basename} - Notes.md`;
-    const notesFilePath = `${((_a = pdfFile.parent) == null ? void 0 : _a.path) || ""}/${notesFileName}`;
-    try {
-      let notesFile = this.app.vault.getAbstractFileByPath(
-        notesFilePath
-      );
-      if (!notesFile) {
-        const initialContent = `# Notes for ${pdfFile.basename}
-
-## Page 1
-
-`;
-        notesFile = await this.app.vault.create(notesFilePath, initialContent);
+  createPdfControls() {
+    if (!this.pdfContainer || !this.currentPdf)
+      return;
+    const controls = this.pdfContainer.createDiv({ cls: "pdf-controls" });
+    const visibilityGroup = controls.createDiv({ cls: "pdf-controls-group" });
+    const togglePdfBtn = visibilityGroup.createEl("button", {
+      cls: "pdf-toggle-button",
+      text: this.plugin.settings.showPdf ? "Hide PDF" : "Show PDF"
+    });
+    const toggleNotesBtn = visibilityGroup.createEl("button", {
+      cls: "pdf-toggle-button",
+      text: this.plugin.settings.showNotes ? "Hide Notes" : "Show Notes"
+    });
+    const saveBtn = visibilityGroup.createEl("button", {
+      cls: "pdf-toggle-button",
+      text: "Save PDF + Notes"
+    });
+    saveBtn.onclick = async () => {
+      if (!this.currentPdf || !this.currentPdfPath) {
+        new import_obsidian.Notice("No PDF loaded to save");
+        return;
       }
-    } catch (error) {
-      console.error("Error creating notes file:", error);
-      new import_obsidian.Notice("Error creating notes file");
-    }
+      const defaultName = this.currentPdfPath.replace(/\.pdf$/, "-copy");
+      await this.savePdfWithNotes(defaultName);
+    };
+    togglePdfBtn.onclick = async () => {
+      if (!this.plugin.settings.showPdf && !this.plugin.settings.showNotes) {
+        new import_obsidian.Notice("At least one section must remain visible");
+        return;
+      }
+      this.plugin.settings.showPdf = !this.plugin.settings.showPdf;
+      togglePdfBtn.textContent = this.plugin.settings.showPdf ? "Hide PDF" : "Show PDF";
+      await this.plugin.saveSettings();
+      this.updateVisibility();
+    };
+    toggleNotesBtn.onclick = async () => {
+      if (!this.plugin.settings.showNotes && !this.plugin.settings.showPdf) {
+        new import_obsidian.Notice("At least one section must remain visible");
+        return;
+      }
+      this.plugin.settings.showNotes = !this.plugin.settings.showNotes;
+      toggleNotesBtn.textContent = this.plugin.settings.showNotes ? "Hide Notes" : "Show Notes";
+      await this.plugin.saveSettings();
+      this.updateVisibility();
+    };
+    const navControls = controls.createDiv("pdf-controls-group");
+    const prevButton = navControls.createEl("button", {
+      text: "\u2190 Previous",
+      cls: "mod-cta"
+    });
+    prevButton.onclick = () => {
+      if (this.currentPage > 1) {
+        this.renderPage(this.currentPage - 1);
+      }
+    };
+    const pageInfo = navControls.createDiv("pdf-page-number");
+    pageInfo.createSpan({ text: "Page " });
+    const pageInput = pageInfo.createEl("input", {
+      type: "number",
+      value: this.currentPage.toString(),
+      attr: {
+        min: "1",
+        max: this.currentPdf.numPages.toString()
+      }
+    });
+    pageInfo.createSpan({ text: ` of ${this.currentPdf.numPages}` });
+    pageInput.onchange = () => {
+      const newPage = parseInt(pageInput.value);
+      if (newPage >= 1 && newPage <= this.currentPdf.numPages) {
+        this.renderPage(newPage);
+      }
+    };
+    const nextButton = navControls.createEl("button", {
+      text: "Next \u2192",
+      cls: "mod-cta"
+    });
+    nextButton.onclick = () => {
+      if (this.currentPage < this.currentPdf.numPages) {
+        this.renderPage(this.currentPage + 1);
+      }
+    };
+    const zoomControls = controls.createDiv("pdf-controls-group");
+    const zoomOutButton = zoomControls.createEl("button", {
+      text: "\u2212",
+      cls: "pdf-zoom-button",
+      attr: { title: "Zoom Out" }
+    });
+    zoomOutButton.onclick = () => {
+      this.currentScale = Math.max(0.5, this.currentScale - 0.2);
+      this.renderPage(this.currentPage, false);
+    };
+    const zoomDisplay = zoomControls.createSpan({
+      cls: "pdf-zoom-display",
+      text: `${Math.round(this.currentScale * 100)}%`
+    });
+    const zoomInButton = zoomControls.createEl("button", {
+      text: "+",
+      cls: "pdf-zoom-button",
+      attr: { title: "Zoom In" }
+    });
+    zoomInButton.onclick = () => {
+      this.currentScale = Math.min(3, this.currentScale + 0.2);
+      this.renderPage(this.currentPage, false);
+    };
+    const fitModeSelect = zoomControls.createEl("select", {
+      cls: "pdf-fit-mode"
+    });
+    const fitModes = [
+      { value: "width", label: "Fit Width" },
+      { value: "height", label: "Fit Height" },
+      { value: "page", label: "Fit Page" }
+    ];
+    fitModes.forEach((mode) => {
+      const option = fitModeSelect.createEl("option", {
+        value: mode.value,
+        text: mode.label
+      });
+      if (mode.value === this.plugin.settings.fitMode) {
+        option.selected = true;
+      }
+    });
+    fitModeSelect.onchange = async () => {
+      this.plugin.settings.fitMode = fitModeSelect.value;
+      await this.plugin.saveSettings();
+      this.currentScale = this.calculateFitScale(
+        await this.currentPdf.getPage(this.currentPage)
+      );
+      this.renderPage(this.currentPage, false);
+    };
+    const loadButton = controls.createEl("button", {
+      text: "Load Saved",
+      cls: "mod-cta"
+    });
+    loadButton.onclick = async () => {
+      await this.loadSavedPdf();
+    };
+    const layoutControls = controls.createDiv("pdf-controls-group");
+    const layoutSelect = layoutControls.createEl("select", {
+      cls: "pdf-layout-select"
+    });
+    const layouts = [
+      { value: "top", label: "PDF on Top" },
+      { value: "bottom", label: "PDF on Bottom" },
+      { value: "left", label: "PDF on Left" },
+      { value: "right", label: "PDF on Right" }
+    ];
+    layouts.forEach((layout) => {
+      const option = layoutSelect.createEl("option", {
+        value: layout.value,
+        text: layout.label
+      });
+      if (layout.value === this.plugin.settings.layout) {
+        option.selected = true;
+      }
+    });
+    layoutSelect.onchange = async () => {
+      this.plugin.settings.layout = layoutSelect.value;
+      await this.plugin.saveSettings();
+      this.updateLayout();
+    };
+    this.registerDomEvent(document, "keydown", (e) => {
+      if (e.target instanceof HTMLTextAreaElement)
+        return;
+      if (e.key === "+" && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        zoomInButton.click();
+      } else if (e.key === "-" && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        zoomOutButton.click();
+      } else if (e.key === "0" && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        fitModeSelect.click();
+      } else if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
+        prevButton.click();
+      } else if (e.key === "ArrowRight" || e.key === "ArrowDown") {
+        nextButton.click();
+      }
+    });
   }
-  async updateNote(pageNumber) {
-    var _a;
-    if (!this.currentPdfPath)
+  calculateFitScale(page) {
+    if (!this.pdfContainer)
+      return 1;
+    const viewport = page.getViewport({ scale: 1 });
+    const containerWidth = this.pdfContainer.clientWidth - 40;
+    const containerHeight = this.pdfContainer.clientHeight - 100;
+    let scale = 1;
+    switch (this.plugin.settings.fitMode) {
+      case "width":
+        scale = containerWidth / viewport.width;
+        break;
+      case "height":
+        scale = containerHeight / viewport.height;
+        break;
+      case "page":
+        scale = Math.min(
+          containerWidth / viewport.width,
+          containerHeight / viewport.height
+        );
+        break;
+    }
+    return scale;
+  }
+  async updateNoteSection(pageNumber) {
+    if (!this.noteContainer || !this.currentPdfPath)
       return;
     this.noteContainer.empty();
-    const noteHeader = this.noteContainer.createEl("h2", {
-      text: `Notes for Page ${pageNumber}`
+    const nav = this.noteContainer.createDiv("note-navigation");
+    if (pageNumber > 1) {
+      const prevLink = nav.createEl("a", { text: "\u2190 Previous Page" });
+      prevLink.onclick = () => this.renderPage(pageNumber - 1);
+    }
+    const viewAllLink = nav.createEl("a", { text: "View All Notes" });
+    viewAllLink.onclick = () => this.showAllNotes();
+    if (this.currentPdf && pageNumber < this.currentPdf.numPages) {
+      const nextLink = nav.createEl("a", { text: "Next Page \u2192" });
+      nextLink.onclick = () => this.renderPage(pageNumber + 1);
+    }
+    const togglePdfBtn = nav.createEl("button", {
+      cls: "pdf-toggle-button",
+      text: this.plugin.settings.showPdf ? "Hide PDF" : "Show PDF"
+    });
+    togglePdfBtn.onclick = async () => {
+      if (!this.plugin.settings.showPdf && !this.plugin.settings.showNotes) {
+        new import_obsidian.Notice("At least one section must remain visible");
+        return;
+      }
+      this.plugin.settings.showPdf = !this.plugin.settings.showPdf;
+      togglePdfBtn.textContent = this.plugin.settings.showPdf ? "Hide PDF" : "Show PDF";
+      await this.plugin.saveSettings();
+      this.updateVisibility();
+    };
+    const header = this.noteContainer.createEl("h2", {
+      text: `Notes for Page ${pageNumber}`,
+      cls: "note-page-header"
     });
     const noteArea = this.noteContainer.createEl("textarea", {
+      cls: "note-content",
       attr: {
-        placeholder: "Enter your notes for this page...",
-        style: "width: 100%; height: 80%; resize: none;"
+        placeholder: "Enter your notes for this page..."
       }
     });
-    this.noteContainer.addEventListener(
-      "scroll",
-      () => this.handleNoteScroll()
-    );
-    const pdfFile = this.app.vault.getAbstractFileByPath(
-      this.currentPdfPath
-    );
-    if (pdfFile) {
-      const notesFileName = `${pdfFile.basename} - Notes.md`;
-      const notesFilePath = `${((_a = pdfFile.parent) == null ? void 0 : _a.path) || ""}/${notesFileName}`;
-      const notesFile = this.app.vault.getAbstractFileByPath(
-        notesFilePath
-      );
-      if (notesFile) {
-        const content = await this.app.vault.read(notesFile);
-        const pageSection = this.extractPageNotes(content, pageNumber);
-        noteArea.value = pageSection || "";
-      }
+    const notes = await this.loadNotes(pageNumber);
+    if (notes) {
+      noteArea.value = notes;
     }
-    noteArea.addEventListener("blur", async () => {
+    noteArea.onblur = async () => {
       await this.saveNotes(pageNumber, noteArea.value);
-    });
+    };
   }
-  handleNoteScroll() {
-  }
-  extractPageNotes(content, pageNumber) {
-    const pageHeader = `## Page ${pageNumber}`;
-    const lines = content.split("\n");
-    const pageStart = lines.findIndex((line) => line.trim() === pageHeader);
-    if (pageStart === -1)
-      return "";
-    let pageEnd = lines.slice(pageStart + 1).findIndex((line) => line.startsWith("## Page"));
-    if (pageEnd === -1)
-      pageEnd = lines.length - pageStart - 1;
-    return lines.slice(pageStart + 1, pageStart + 1 + pageEnd).join("\n").trim();
+  async loadNotes(pageNumber) {
+    if (!this.currentPdfPath)
+      return null;
+    const notesFile = `${this.currentPdfPath}-notes.md`;
+    try {
+      const content = await this.app.vault.adapter.read(notesFile);
+      const pageMatch = content.match(
+        new RegExp(`## Page ${pageNumber}\\n([\\s\\S]*?)(?=## Page|$)`)
+      );
+      return pageMatch ? pageMatch[1].trim() : null;
+    } catch (error) {
+      return null;
+    }
   }
   async saveNotes(pageNumber, notes) {
+    if (!this.currentPdfPath)
+      return;
+    const notesFile = `${this.currentPdfPath}-notes.md`;
+    try {
+      let content = "";
+      try {
+        content = await this.app.vault.adapter.read(notesFile);
+      } catch (e) {
+        content = "# PDF Notes\n\n";
+      }
+      const pageHeader = `## Page ${pageNumber}`;
+      const pageRegex = new RegExp(`${pageHeader}\\n[\\s\\S]*?(?=## Page|$)`);
+      const newPageContent = `${pageHeader}
+${notes}
+
+`;
+      if (pageRegex.test(content)) {
+        content = content.replace(pageRegex, newPageContent.trim());
+      } else {
+        content += newPageContent;
+      }
+      await this.app.vault.adapter.write(notesFile, content);
+    } catch (error) {
+      console.error("Error saving notes:", error);
+      new import_obsidian.Notice("Error saving notes");
+    }
+  }
+  async savePdfWithNotes(saveName) {
+    if (!this.currentPdfPath) {
+      new import_obsidian.Notice("No PDF is currently open");
+      return;
+    }
+    try {
+      const currentDir = this.currentPdfPath.substring(
+        0,
+        this.currentPdfPath.lastIndexOf("/")
+      );
+      saveName = saveName.replace(/[\\/:*?"<>|]/g, "-");
+      const newPdfPath = `${currentDir}/${saveName}.pdf`;
+      const newNotesPath = `${currentDir}/${saveName}.md`;
+      const pdfContent = await this.app.vault.adapter.readBinary(
+        this.currentPdfPath
+      );
+      await this.app.vault.adapter.writeBinary(newPdfPath, pdfContent);
+      const notesFile = `${this.currentPdfPath}-notes.md`;
+      try {
+        let notesContent = await this.app.vault.adapter.read(notesFile);
+        const metadata = `---
+pdf: "${saveName}.pdf"
+type: pdf-notes
+created: ${new Date().toISOString()}
+---
+
+`;
+        notesContent = metadata + notesContent;
+        await this.app.vault.adapter.write(newNotesPath, notesContent);
+        new import_obsidian.Notice(`Saved as ${saveName}`);
+      } catch (error) {
+        console.error("Error saving notes:", error);
+        new import_obsidian.Notice(`Only PDF saved as ${saveName} (no notes found)`);
+      }
+      this.currentPdfPath = newPdfPath;
+    } catch (error) {
+      console.error("Error saving:", error);
+      new import_obsidian.Notice("Error saving: " + error.message);
+    }
+  }
+  getCurrentPage() {
+    return this.currentPage;
+  }
+  // ... rest of the existing code ...
+  async loadSavedPdf() {
+    try {
+      const files = this.app.vault.getFiles();
+      const pdfFolders = /* @__PURE__ */ new Set();
+      files.forEach((file) => {
+        var _a, _b;
+        if (file.extension === "pdf" && ((_a = file.parent) == null ? void 0 : _a.path) !== "/") {
+          pdfFolders.add(((_b = file.parent) == null ? void 0 : _b.path) || "");
+        }
+      });
+      if (pdfFolders.size === 0) {
+        new import_obsidian.Notice("No saved PDF combinations found");
+        return;
+      }
+      new LoadSavedPdfModal(
+        this.app,
+        Array.from(pdfFolders).filter((path) => path !== ""),
+        async (folder) => {
+          await this.loadFromSaveFolder(folder);
+        }
+      ).open();
+    } catch (error) {
+      console.error("Error loading saved PDF:", error);
+      new import_obsidian.Notice("Error loading saved PDF: " + error.message);
+    }
+  }
+  async loadFromSaveFolder(folder) {
+    try {
+      const files = this.app.vault.getFiles();
+      const pdfFile = files.find(
+        (file) => {
+          var _a;
+          return ((_a = file.parent) == null ? void 0 : _a.path) === folder && file.extension === "pdf";
+        }
+      );
+      if (!pdfFile) {
+        throw new Error("No PDF file found in selected folder");
+      }
+      this.currentSaveFolder = folder;
+      await this.loadPdfFromVault(pdfFile);
+      const notesFile = this.app.vault.getFiles().find(
+        (file) => {
+          var _a;
+          return ((_a = file.parent) == null ? void 0 : _a.path) === folder && file.extension === "md";
+        }
+      );
+      if (notesFile) {
+        const notesContent = await this.app.vault.read(notesFile);
+        this.updateNoteSection(this.currentPage);
+      }
+      new import_obsidian.Notice(`Loaded PDF from ${folder}`);
+    } catch (error) {
+      console.error("Error loading from save folder:", error);
+      new import_obsidian.Notice("Error loading saved PDF: " + error.message);
+    }
+  }
+  updateVisibility() {
     var _a;
-    if (!this.currentPdfPath)
+    if (!this.pdfContainer || !this.noteContainer)
       return;
-    const pdfFile = this.app.vault.getAbstractFileByPath(
-      this.currentPdfPath
-    );
-    if (!pdfFile)
-      return;
-    const notesFileName = `${pdfFile.basename} - Notes.md`;
-    const notesFilePath = `${((_a = pdfFile.parent) == null ? void 0 : _a.path) || ""}/${notesFileName}`;
-    const notesFile = this.app.vault.getAbstractFileByPath(
-      notesFilePath
-    );
-    if (notesFile) {
-      const content = await this.app.vault.read(notesFile);
-      const updatedContent = this.updatePageNotes(content, pageNumber, notes);
-      await this.app.vault.modify(notesFile, updatedContent);
+    if (!this.plugin.settings.showPdf && !this.plugin.settings.showNotes) {
+      this.plugin.settings.showPdf = true;
+      this.plugin.settings.showNotes = true;
+      this.plugin.saveSettings();
+    }
+    this.pdfContainer.style.display = this.plugin.settings.showPdf ? "block" : "none";
+    this.noteContainer.style.display = this.plugin.settings.showNotes ? "block" : "none";
+    const container = (_a = this.containerEl) == null ? void 0 : _a.children[1];
+    if (container) {
+      container.style.display = "flex";
     }
   }
-  updatePageNotes(content, pageNumber, newNotes) {
-    const pageHeader = `## Page ${pageNumber}`;
-    const lines = content.split("\n");
-    const pageStart = lines.findIndex((line) => line.trim() === pageHeader);
-    if (pageStart === -1) {
-      return `${content.trim()}
-
-${pageHeader}
-
-${newNotes}`;
-    }
-    let pageEnd = lines.slice(pageStart + 1).findIndex((line) => line.startsWith("## Page"));
-    if (pageEnd === -1)
-      pageEnd = lines.length;
-    else
-      pageEnd = pageStart + 1 + pageEnd;
-    const beforePage = lines.slice(0, pageStart);
-    const afterPage = lines.slice(pageEnd);
-    return [...beforePage, pageHeader, "", newNotes, ...afterPage].join("\n");
-  }
-  async loadHighlights() {
-    if (!this.currentPdfPath)
+  async showAllNotes() {
+    if (!this.currentPdf || !this.currentPdfPath)
       return;
-    const highlightsFile = `${this.currentPdfPath}.highlights.json`;
-    try {
-      const highlightsData = await this.app.vault.adapter.read(highlightsFile);
-      this.highlights = new Map(JSON.parse(highlightsData));
-    } catch (error) {
-      this.highlights = /* @__PURE__ */ new Map();
-    }
-  }
-  async saveHighlights() {
-    if (!this.currentPdfPath)
-      return;
-    const highlightsFile = `${this.currentPdfPath}.highlights.json`;
-    const highlightsData = JSON.stringify(
-      Array.from(this.highlights.entries())
-    );
-    try {
-      await this.app.vault.adapter.write(highlightsFile, highlightsData);
-    } catch (error) {
-      console.error("Error saving highlights:", error);
-      new import_obsidian.Notice("Error saving highlights");
-    }
-  }
-  createToolbar() {
-    const toolbar = this.pdfContainer.createDiv("pdf-toolbar");
-    const prevButton = toolbar.createEl("button", {
-      text: "Previous",
-      cls: "pdf-nav-button"
+    const modal = new import_obsidian.Modal(this.app);
+    modal.titleEl.setText("All Notes");
+    const content = modal.contentEl.createDiv();
+    content.addClass("all-notes-view");
+    content.createEl("style", {
+      text: `
+        .all-notes-view {
+          max-height: 80vh;
+          overflow-y: auto;
+          padding: 1em;
+        }
+        .page-notes {
+          margin-bottom: 2em;
+          padding-bottom: 1em;
+          border-bottom: 1px solid var(--background-modifier-border);
+        }
+        .page-notes:last-child {
+          border-bottom: none;
+        }
+      `
     });
-    prevButton.onclick = async () => {
-      if (this.currentPage > 1) {
-        await this.renderPage(this.currentPage - 1);
+    for (let i = 1; i <= this.currentPdf.numPages; i++) {
+      const notes = await this.loadNotes(i);
+      if (notes) {
+        const pageSection = content.createDiv("page-notes");
+        pageSection.createEl("h3", { text: `Page ${i}` });
+        pageSection.createEl("p", { text: notes });
       }
-    };
-    const nextButton = toolbar.createEl("button", {
-      text: "Next",
-      cls: "pdf-nav-button"
-    });
-    nextButton.onclick = async () => {
-      if (this.currentPdf && this.currentPage < this.currentPdf.numPages) {
-        await this.renderPage(this.currentPage + 1);
-      }
-    };
-    const pageDisplay = toolbar.createEl("span", {
-      cls: "pdf-page-display"
-    });
-    pageDisplay.setText(`Page ${this.currentPage}`);
-    const collapseButton = toolbar.createEl("button", {
-      text: "\u25C0",
-      cls: "pdf-collapse-button"
-    });
-    collapseButton.onclick = () => this.togglePdfCollapse();
-  }
-  togglePdfCollapse() {
-    this.isPdfCollapsed = !this.isPdfCollapsed;
-    this.pdfContainer.toggleClass("collapsed", this.isPdfCollapsed);
-    const collapseButton = this.pdfContainer.querySelector(
-      ".pdf-collapse-button"
-    );
-    if (collapseButton) {
-      collapseButton.innerHTML = this.isPdfCollapsed ? "\u25B6" : "\u25C0";
     }
+    modal.open();
+  }
+  updateTheme() {
+    const isDark = this.plugin.settings.theme === "dark" || this.plugin.settings.theme === "system" && document.body.hasClass("theme-dark");
+    if (this.containerEl) {
+      this.containerEl.toggleClass("pdf-dark-theme", isDark);
+      this.containerEl.toggleClass("pdf-light-theme", !isDark);
+    }
+    if (this.currentPage && this.currentPdf) {
+      this.renderPage(this.currentPage);
+    }
+  }
+  // Add theme-specific styles
+  onload() {
+    this.containerEl.createEl("style", {
+      text: `
+        .pdf-dark-theme .pdf-container {
+          background-color: var(--background-primary);
+          color: var(--text-normal);
+        }
+        
+        .pdf-dark-theme canvas {
+          filter: invert(0.9) hue-rotate(180deg);
+        }
+        
+        .pdf-light-theme .pdf-container {
+          background-color: #ffffff;
+          color: #000000;
+        }
+        
+        .pdf-light-theme canvas {
+          filter: none;
+        }
+        
+        .pdf-dark-theme .pdf-controls,
+        .pdf-dark-theme .note-controls {
+          background-color: var(--background-secondary);
+          border-bottom: 1px solid var(--background-modifier-border);
+        }
+        
+        .pdf-light-theme .pdf-controls,
+        .pdf-light-theme .note-controls {
+          background-color: #f5f5f5;
+          border-bottom: 1px solid #ddd;
+        }
+      `
+    });
+    this.updateTheme();
+  }
+  // Update theme when the view is revealed
+  onunload() {
+  }
+};
+var PdfFileSelectionModal = class extends import_obsidian.Modal {
+  constructor(app, files, onSelect) {
+    super(app);
+    this.files = files;
+    this.onSelect = onSelect;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h2", { text: "Select PDF File" });
+    const fileList = contentEl.createDiv("pdf-file-list");
+    this.files.forEach((file) => {
+      const item = fileList.createDiv("pdf-file-item");
+      item.createEl("span", { text: file.path });
+      item.onclick = () => {
+        this.onSelect(file);
+        this.close();
+      };
+    });
+  }
+  onClose() {
+    const { contentEl } = this;
+    contentEl.empty();
+  }
+};
+var LoadSavedPdfModal = class extends import_obsidian.Modal {
+  constructor(app, folders, onSelect) {
+    super(app);
+    this.folders = folders;
+    this.onSelect = onSelect;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h2", { text: "Load Saved PDF and Notes" });
+    const list = contentEl.createDiv("saved-pdf-list");
+    this.folders.forEach((folder) => {
+      const item = list.createDiv("saved-pdf-item");
+      item.createEl("span", { text: folder });
+      item.onclick = () => {
+        this.onSelect(folder);
+        this.close();
+      };
+    });
+    if (this.folders.length === 0) {
+      list.createEl("p", { text: "No saved PDF combinations found." });
+    }
+  }
+  onClose() {
+    const { contentEl } = this;
+    contentEl.empty();
   }
 };
 var PdfNoteAligner = class extends import_obsidian.Plugin {
@@ -18977,7 +19620,7 @@ var PdfNoteAligner = class extends import_obsidian.Plugin {
       PDF_NOTE_VIEW_TYPE,
       (leaf) => new PdfNoteView(leaf, this)
     );
-    this.addRibbonIcon("document", "Open PDF Note Viewer", async () => {
+    this.addRibbonIcon("document", "Open A PDF Note Viewer", async () => {
       await this.activateView();
     });
     this.registerEvent(
@@ -18997,7 +19640,7 @@ var PdfNoteAligner = class extends import_obsidian.Plugin {
     );
     this.addSettingTab(new PdfNoteAlignerSettingTab(this.app, this));
   }
-  onunload() {
+  async onunload() {
     this.app.workspace.detachLeavesOfType(PDF_NOTE_VIEW_TYPE);
   }
   async activateView() {
@@ -19028,37 +19671,74 @@ var PdfNoteAlignerSettingTab = class extends import_obsidian.PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "PDF Note Viewer Settings" });
-    new import_obsidian.Setting(containerEl).setName("Default scale").setDesc("Default scale for PDF rendering").addText(
-      (text) => text.setPlaceholder("1.0").setValue(this.plugin.settings.defaultScale.toString()).onChange(async (value) => {
-        this.plugin.settings.defaultScale = parseFloat(value) || 1;
+    containerEl.createEl("h2", { text: "A PDF Note Viewer Settings" });
+    new import_obsidian.Setting(containerEl).setName("Default Layout").setDesc("Choose where the PDF should appear relative to the notes").addDropdown(
+      (dropdown) => dropdown.addOption("top", "Top").addOption("bottom", "Bottom").addOption("left", "Left").addOption("right", "Right").setValue(this.plugin.settings.layout).onChange(async (value) => {
+        this.plugin.settings.layout = value;
         await this.plugin.saveSettings();
+        this.app.workspace.getLeavesOfType(PDF_NOTE_VIEW_TYPE).forEach((leaf) => {
+          const view = leaf.view;
+          view.updateLayout();
+        });
       })
     );
-  }
-};
-var PdfFileSelectionModal = class extends import_obsidian.Modal {
-  constructor(app, files, onSelect) {
-    super(app);
-    this.files = files;
-    this.onSelect = onSelect;
-  }
-  onOpen() {
-    const { contentEl } = this;
-    contentEl.empty();
-    contentEl.createEl("h2", { text: "Select PDF File" });
-    const fileList = contentEl.createDiv("pdf-file-list");
-    this.files.forEach((file) => {
-      const item = fileList.createDiv("pdf-file-item");
-      item.createEl("span", { text: file.path });
-      item.onclick = () => {
-        this.onSelect(file);
-        this.close();
-      };
+    new import_obsidian.Setting(containerEl).setName("Default Fit Mode").setDesc("Choose how PDFs should fit in the viewer by default").addDropdown(
+      (dropdown) => dropdown.addOption("width", "Fit to Width").addOption("height", "Fit to Height").addOption("page", "Fit to Page").setValue(this.plugin.settings.fitMode).onChange(async (value) => {
+        this.plugin.settings.fitMode = value;
+        await this.plugin.saveSettings();
+        this.app.workspace.getLeavesOfType(PDF_NOTE_VIEW_TYPE).forEach((leaf) => {
+          const view = leaf.view;
+          view.renderPage(view.getCurrentPage(), false);
+        });
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Show PDF by Default").setDesc("Show the PDF viewer when opening files").addToggle(
+      (toggle) => toggle.setValue(this.plugin.settings.showPdf).onChange(async (value) => {
+        this.plugin.settings.showPdf = value;
+        await this.plugin.saveSettings();
+        this.app.workspace.getLeavesOfType(PDF_NOTE_VIEW_TYPE).forEach((leaf) => {
+          const view = leaf.view;
+          view.updateVisibility();
+        });
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Show Notes by Default").setDesc("Show the notes panel when opening files").addToggle(
+      (toggle) => toggle.setValue(this.plugin.settings.showNotes).onChange(async (value) => {
+        this.plugin.settings.showNotes = value;
+        await this.plugin.saveSettings();
+        this.app.workspace.getLeavesOfType(PDF_NOTE_VIEW_TYPE).forEach((leaf) => {
+          const view = leaf.view;
+          view.updateVisibility();
+        });
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Theme").setDesc("Choose the theme for the PDF viewer").addDropdown(
+      (dropdown) => dropdown.addOption("system", "Follow System Theme").addOption("light", "Light Theme").addOption("dark", "Dark Theme").setValue(this.plugin.settings.theme).onChange(async (value) => {
+        this.plugin.settings.theme = value;
+        await this.plugin.saveSettings();
+        this.app.workspace.iterateAllLeaves((leaf) => {
+          if (leaf.view instanceof PdfNoteView) {
+            leaf.view.updateTheme();
+          }
+        });
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Reset View Settings").setDesc(
+      "Reset PDF Note Viewer visibility and layout settings to default"
+    ).addButton((button) => {
+      button.setButtonText("Reset to Default").onClick(async () => {
+        this.plugin.settings.showPdf = true;
+        this.plugin.settings.showNotes = true;
+        this.plugin.settings.layout = "top";
+        await this.plugin.saveSettings();
+        this.app.workspace.iterateAllLeaves((leaf) => {
+          if (leaf.view instanceof PdfNoteView) {
+            leaf.view.updateVisibility();
+            leaf.view.updateLayout();
+          }
+        });
+        new import_obsidian.Notice("PDF Note Viewer settings reset to default");
+      });
     });
-  }
-  onClose() {
-    const { contentEl } = this;
-    contentEl.empty();
   }
 };
