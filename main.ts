@@ -12,6 +12,13 @@ import {
   Setting,
 } from "obsidian";
 import * as pdfjsLib from "pdfjs-dist";
+import { EditorView, keymap } from "@codemirror/view";
+import { EditorState } from "@codemirror/state";
+import { basicSetup } from "@codemirror/basic-setup";
+import { indentWithTab } from "@codemirror/commands";
+
+// Import PDF.js worker
+import pdfjsWorker from "pdfjs-dist/build/pdf.worker.entry";
 
 const PDF_NOTE_VIEW_TYPE = "a-pdf-note-viewer";
 
@@ -80,10 +87,8 @@ class PdfNoteView extends ItemView {
 
   async onOpen(): Promise<void> {
     try {
-      // Initialize PDF.js worker
-      if (!pdfjsLib.GlobalWorkerOptions.workerSrc) {
-        pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
-      }
+      // Initialize PDF.js worker using local worker file
+      pdfjsLib.GlobalWorkerOptions.workerSrc = "pdf.worker.min.js";
 
       // Initialize the container
       const container = this.containerEl.children[1];
@@ -1169,7 +1174,7 @@ created: ${new Date().toISOString()}
     const isDark =
       this.plugin.settings.theme === "dark" ||
       (this.plugin.settings.theme === "system" &&
-        document.body.hasClass("theme-dark"));
+        document.body.classList.contains("theme-dark"));
 
     if (this.containerEl) {
       this.containerEl.toggleClass("pdf-dark-theme", isDark);
@@ -1356,9 +1361,6 @@ export default class PdfNoteAligner extends Plugin {
 
   async onload() {
     await this.loadSettings();
-
-    // Initialize PDF.js worker
-    pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
 
     // Register view type
     this.registerView(
