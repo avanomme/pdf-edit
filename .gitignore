@@ -1,1 +1,29 @@
-node_modules
+# Dependencies
+node_modules/
+package-lock.json
+
+# Build output
+main.js
+*.js.map
+pdf.worker.min.js
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Obsidian data
+data.json
+
+# Logs
+*.log
+npm-debug.log*
+
+# Temporary files
+*.tmp
+*.temp

@@ -10,6 +10,9 @@ import {
   FileSystemAdapter,
   Modal,
   Setting,
+  MarkdownView,
+  TextFileView,
+  Component,
 } from "obsidian";
 import * as pdfjsLib from "pdfjs-dist";
 import { EditorView, keymap } from "@codemirror/view";
@@ -30,16 +33,40 @@ interface PdfNoteAlignerSettings {
   showNotes: boolean;
   showPdf: boolean;
   theme: "light" | "dark" | "system";
+  autoSaveInterval: number;
+  enableHighlighting: boolean;
+  highlightColor: string;
+  noteFontSize: number;
+  pdfBackgroundColor: string;
+  enableTextSelection: boolean;
+  rememberLastPage: boolean;
+  syncScroll: boolean;
+  defaultNoteTemplate: string;
+  exportFormat: "markdown" | "pdf" | "html";
+  keyboardShortcuts: boolean;
+  autoOpenPdfsWithNotes: boolean;
 }
 
 const DEFAULT_SETTINGS: PdfNoteAlignerSettings = {
   defaultScale: 1.0,
   debug: false,
   layout: "top",
-  fitMode: "page",
+  fitMode: "width",
   showNotes: true,
   showPdf: true,
   theme: "system",
+  autoSaveInterval: 30,
+  enableHighlighting: true,
+  highlightColor: "#ffeb3b",
+  noteFontSize: 14,
+  pdfBackgroundColor: "#ffffff",
+  enableTextSelection: true,
+  rememberLastPage: true,
+  syncScroll: false,
+  defaultNoteTemplate: "## Page {page}\\n\\n### Key Points\\n- \\n\\n### Questions\\n- \\n\\n### Summary\\n",
+  exportFormat: "markdown",
+  keyboardShortcuts: true,
+  autoOpenPdfsWithNotes: true,
 };
 
 interface PdfHighlight {
@@ -70,6 +97,11 @@ class PdfNoteView extends ItemView {
   private plugin: PdfNoteAligner;
   private fitToWidthScale: number = 1.0;
   private currentSaveFolder: string | null = null;
+  private currentNotesFile: TFile | null = null;
+  private autoSaveTimer: NodeJS.Timeout | null = null;
+  private lastPageCache: Map<string, number> = new Map();
+  private noteTemplates: Map<number, string> = new Map();
+  private embeddedLeaf: WorkspaceLeaf | null = null;
 
   constructor(leaf: WorkspaceLeaf, plugin: PdfNoteAligner) {
     super(leaf);
@@ -87,8 +119,9 @@ class PdfNoteView extends ItemView {
 
   async onOpen(): Promise<void> {
     try {
-      // Initialize PDF.js worker using local worker file
-      pdfjsLib.GlobalWorkerOptions.workerSrc = "pdf.worker.min.js";
+      // Initialize PDF.js worker - use the bundled worker
+      // @ts-ignore
+      pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
 
       // Initialize the container
       const container = this.containerEl.children[1];
@@ -122,6 +155,18 @@ class PdfNoteView extends ItemView {
               this.renderPage(this.currentPage, false).catch(console.error);
             }
           }
+        })
+      );
+
+      // Register auto-save on window close/beforeunload
+      this.registerDomEvent(window, "beforeunload", () => {
+        this.saveCurrentNotes();
+      });
+
+      // Register auto-save on app quit
+      this.registerEvent(
+        this.app.workspace.on("quit", () => {
+          this.saveCurrentNotes();
         })
       );
 
@@ -364,8 +409,27 @@ class PdfNoteView extends ItemView {
       .pdf-controls {
         position: sticky;
         top: 0;
-        z-index: 100;
+        z-index: 1000;
+        background: var(--background-secondary) !important;
+        backdrop-filter: blur(10px);
+        -webkit-backdrop-filter: blur(10px);
+        border-bottom: 2px solid var(--background-modifier-border);
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+        padding: 8px;
+        margin: 0;
+      }
+      .pdf-controls::before {
+        content: '';
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
         background: var(--background-secondary);
+        z-index: -1;
+      }
+      .pdf-page-container {
+        margin-top: 10px;
       }
     `;
     document.head.appendChild(style);
@@ -587,6 +651,12 @@ class PdfNoteView extends ItemView {
 
       // Update current page
       this.currentPage = pageNumber;
+
+      // Setup text selection and highlighting for this page
+      this.setupTextSelectionHandling(canvasContainer, pageNumber);
+      
+      // Render existing highlights for this page
+      this.renderPageHighlights(canvasContainer, pageNumber);
 
       // Update notes for this page
       this.updateNoteSection(pageNumber);
@@ -863,7 +933,7 @@ class PdfNoteView extends ItemView {
     return scale;
   }
 
-  private async updateNoteSection(pageNumber: number): Promise<void> {
+  public async updateNoteSection(pageNumber: number): Promise<void> {
     if (!this.noteContainer || !this.currentPdfPath) return;
 
     this.noteContainer.empty();
@@ -899,9 +969,6 @@ class PdfNoteView extends ItemView {
         return;
       }
       this.plugin.settings.showPdf = !this.plugin.settings.showPdf;
-      togglePdfBtn.textContent = this.plugin.settings.showPdf
-        ? "Hide PDF"
-        : "Show PDF";
       await this.plugin.saveSettings();
       this.updateVisibility();
     };
@@ -912,24 +979,482 @@ class PdfNoteView extends ItemView {
       cls: "note-page-header",
     });
 
-    // Create note textarea
-    const noteArea = this.noteContainer.createEl("textarea", {
-      cls: "note-content",
-      attr: {
-        placeholder: "Enter your notes for this page...",
-      },
+    // Create notes file if it doesn't exist and open it in a proper editor
+    await this.createOrLoadNotesFile();
+    await this.createNoteEditor(pageNumber);
+  }
+
+  private async createOrLoadNotesFile(): Promise<void> {
+    if (!this.currentPdfPath) return;
+
+    const notesPath = `${this.currentPdfPath}-notes.md`;
+    
+    try {
+      // Try to get existing notes file
+      this.currentNotesFile = this.app.vault.getAbstractFileByPath(notesPath) as TFile;
+      
+      if (!this.currentNotesFile) {
+        // Create new notes file with metadata
+        const pdfName = this.currentPdfPath.split("/").pop() || "unknown.pdf";
+        const initialContent = `---
+pdf-file: "${pdfName}"
+type: pdf-notes
+created: ${new Date().toISOString()}
+last-modified: ${new Date().toISOString()}
+---
+
+# PDF Notes
+
+`;
+        this.currentNotesFile = await this.app.vault.create(notesPath, initialContent);
+      }
+    } catch (error) {
+      console.error("Error creating/loading notes file:", error);
+      new Notice("Error accessing notes file");
+    }
+  }
+
+  private async createNoteEditor(pageNumber: number): Promise<void> {
+    if (!this.currentNotesFile || !this.noteContainer) return;
+
+    // Create a container for the note editor
+    const editorContainer = this.noteContainer.createDiv("note-editor-container");
+    editorContainer.style.cssText = `
+      height: calc(100% - 60px);
+      width: 100%;
+      border: 1px solid var(--background-modifier-border);
+      border-radius: 6px;
+      overflow: hidden;
+      background: var(--background-primary);
+      display: flex;
+      flex-direction: column;
+    `;
+
+    // Add page navigation and note actions bar
+    const actionBar = editorContainer.createDiv("note-action-bar");
+    actionBar.style.cssText = `
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px;
+      background: var(--background-secondary);
+      border-bottom: 1px solid var(--background-modifier-border);
+    `;
+
+    // Add page marker button
+    const pageMarkerBtn = actionBar.createEl("button", {
+      text: `Go to Page ${pageNumber}`,
+      cls: "mod-cta",
     });
 
-    // Load existing notes
-    const notes = await this.loadNotes(pageNumber);
-    if (notes) {
-      noteArea.value = notes;
+    pageMarkerBtn.onclick = async () => {
+      await this.ensurePageSection(pageNumber);
+      await this.scrollToPageSection(pageNumber);
+    };
+
+    // Add "Open in Tab" button for full editing features
+    const openInTabBtn = actionBar.createEl("button", {
+      text: "Open Note in Tab",
+      cls: "mod-muted",
+    });
+
+    openInTabBtn.onclick = async () => {
+      await this.ensurePageSection(pageNumber);
+      await this.scrollToPageSection(pageNumber);
+    };
+
+    // Create embedded leaf for proper MarkdownView
+    const embeddedLeaf = this.app.workspace.createLeafInParent(this.leaf, 0);
+    await embeddedLeaf.openFile(this.currentNotesFile);
+    
+    const markdownView = embeddedLeaf.view as MarkdownView;
+    if (markdownView && markdownView.containerEl) {
+      // Style the embedded editor
+      const editorArea = editorContainer.createDiv("embedded-editor");
+      editorArea.style.cssText = `
+        flex: 1;
+        overflow: auto;
+        position: relative;
+      `;
+      
+      // Move the markdown view container into our editor
+      editorArea.appendChild(markdownView.containerEl);
+      
+      // Style the editor content
+      markdownView.containerEl.style.cssText = `
+        height: 100%;
+        border: none;
+      `;
+
+      // Store reference for cleanup
+      this.embeddedLeaf = embeddedLeaf;
+      
+      // Setup auto-save
+      this.setupAutoSave(markdownView);
+      
+      // Focus to the page section if it exists
+      setTimeout(async () => {
+        await this.focusPageSection(pageNumber, markdownView);
+      }, 100);
+    }
+  }
+
+  private async ensurePageSection(pageNumber: number): Promise<void> {
+    if (!this.currentNotesFile) return;
+
+    const content = await this.app.vault.read(this.currentNotesFile);
+    const pageHeader = `## Page ${pageNumber}`;
+    
+    if (!content.includes(pageHeader)) {
+      const template = this.plugin.settings.defaultNoteTemplate.replace("{page}", pageNumber.toString());
+      const newContent = content + `\n\n${template}\n`;
+      await this.app.vault.modify(this.currentNotesFile, newContent);
+    }
+  }
+
+  private async scrollToPageSection(pageNumber: number): Promise<void> {
+    // Open the notes file in a new leaf so user can edit it directly
+    const leaf = this.app.workspace.getLeaf("tab");
+    await leaf.openFile(this.currentNotesFile!);
+    
+    // Try to scroll to the page section
+    const view = leaf.view as MarkdownView;
+    if (view && view.editor) {
+      const content = view.editor.getValue();
+      const pageHeader = `## Page ${pageNumber}`;
+      const lines = content.split('\n');
+      const lineIndex = lines.findIndex(line => line.includes(pageHeader));
+      
+      if (lineIndex !== -1) {
+        view.editor.setCursor(lineIndex, 0);
+        view.editor.scrollIntoView({ from: { line: lineIndex, ch: 0 }, to: { line: lineIndex, ch: 0 } });
+      }
+    }
+  }
+
+  private async focusPageSection(pageNumber: number, markdownView: MarkdownView): Promise<void> {
+    if (!markdownView || !markdownView.editor) return;
+
+    try {
+      const content = markdownView.editor.getValue();
+      const pageHeader = `## Page ${pageNumber}`;
+      const lines = content.split('\n');
+      const lineIndex = lines.findIndex(line => line.includes(pageHeader));
+      
+      if (lineIndex !== -1) {
+        markdownView.editor.setCursor(lineIndex, 0);
+        markdownView.editor.scrollIntoView({ from: { line: lineIndex, ch: 0 }, to: { line: lineIndex, ch: 0 } });
+      }
+    } catch (error) {
+      console.error("Error focusing page section:", error);
+    }
+  }
+
+  private setupTextSelectionHandling(pageContainer: HTMLElement, pageNumber: number): void {
+    if (!this.plugin.settings.enableHighlighting) return;
+
+    pageContainer.addEventListener('mouseup', async (event) => {
+      const selection = window.getSelection();
+      if (!selection || selection.isCollapsed || !selection.rangeCount) return;
+
+      const range = selection.getRangeAt(0);
+      const selectedText = range.toString().trim();
+      
+      if (selectedText.length < 2) return; // Ignore very short selections
+
+      // Get the bounding rectangle of the selection
+      const rect = range.getBoundingClientRect();
+      const containerRect = pageContainer.getBoundingClientRect();
+
+      // Create highlight object
+      const highlight: PdfHighlight = {
+        id: `highlight_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+        x: rect.left - containerRect.left,
+        y: rect.top - containerRect.top,
+        width: rect.width,
+        height: rect.height,
+        color: this.plugin.settings.highlightColor,
+        text: selectedText
+      };
+
+      // Add to highlights map
+      if (!this.highlights.has(pageNumber)) {
+        this.highlights.set(pageNumber, []);
+      }
+      this.highlights.get(pageNumber)!.push(highlight);
+
+      // Render the highlight
+      this.renderHighlight(pageContainer, highlight);
+
+      // Save highlights to notes file
+      await this.saveHighlightsToNotes();
+
+      // Clear selection
+      selection.removeAllRanges();
+    });
+  }
+
+  private renderHighlight(container: HTMLElement, highlight: PdfHighlight): void {
+    const highlightEl = container.createDiv('pdf-highlight');
+    highlightEl.style.cssText = `
+      position: absolute;
+      left: ${highlight.x}px;
+      top: ${highlight.y}px;
+      width: ${highlight.width}px;
+      height: ${highlight.height}px;
+      background-color: ${highlight.color};
+      opacity: 0.3;
+      pointer-events: auto;
+      cursor: pointer;
+      border-radius: 2px;
+      z-index: 10;
+    `;
+
+    // Add title for text preview
+    if (highlight.text) {
+      highlightEl.title = highlight.text;
     }
 
-    // Save notes when changed
-    noteArea.onblur = async () => {
-      await this.saveNotes(pageNumber, noteArea.value);
+    // Add click handler for highlight management
+    highlightEl.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.showHighlightMenu(e, highlight, highlightEl);
+    });
+
+    // Store reference to the element for later removal
+    highlightEl.setAttribute('data-highlight-id', highlight.id);
+  }
+
+  private renderPageHighlights(container: HTMLElement, pageNumber: number): void {
+    // Remove existing highlights
+    container.querySelectorAll('.pdf-highlight').forEach(el => el.remove());
+
+    // Render highlights for this page
+    const pageHighlights = this.highlights.get(pageNumber);
+    if (pageHighlights) {
+      pageHighlights.forEach(highlight => {
+        this.renderHighlight(container, highlight);
+      });
+    }
+  }
+
+  private showHighlightMenu(event: MouseEvent, highlight: PdfHighlight, highlightEl: HTMLElement): void {
+    const menu = document.createElement('div');
+    menu.className = 'pdf-highlight-menu';
+    menu.style.cssText = `
+      position: fixed;
+      left: ${event.clientX}px;
+      top: ${event.clientY}px;
+      background: var(--background-primary);
+      border: 1px solid var(--background-modifier-border);
+      border-radius: 6px;
+      padding: 8px;
+      box-shadow: var(--shadow-s);
+      z-index: 1000;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      min-width: 120px;
+    `;
+
+    // Add color picker
+    const colorSection = menu.createDiv('highlight-color-section');
+    colorSection.createEl('div', { text: 'Color:', cls: 'highlight-menu-label' });
+    const colorRow = colorSection.createDiv('highlight-color-row');
+    colorRow.style.cssText = 'display: flex; gap: 4px; margin-top: 4px;';
+
+    const colors = ['#ffeb3b', '#4caf50', '#2196f3', '#ff9800', '#e91e63', '#9c27b0'];
+    colors.forEach(color => {
+      const colorBtn = colorRow.createEl('button');
+      colorBtn.style.cssText = `
+        width: 20px;
+        height: 20px;
+        background: ${color};
+        border: 2px solid ${color === highlight.color ? 'var(--text-normal)' : 'transparent'};
+        border-radius: 3px;
+        cursor: pointer;
+      `;
+      colorBtn.onclick = () => {
+        highlight.color = color;
+        highlightEl.style.backgroundColor = color;
+        this.saveHighlightsToNotes();
+        menu.remove();
+      };
+    });
+
+    // Add delete button
+    const deleteBtn = menu.createEl('button', { text: 'Delete', cls: 'mod-warning' });
+    deleteBtn.style.cssText = 'margin-top: 4px;';
+    deleteBtn.onclick = () => {
+      this.deleteHighlight(highlight, highlightEl);
+      menu.remove();
     };
+
+    document.body.appendChild(menu);
+
+    // Remove menu when clicking outside
+    const removeMenu = (e: MouseEvent) => {
+      if (!menu.contains(e.target as Node)) {
+        menu.remove();
+        document.removeEventListener('click', removeMenu);
+      }
+    };
+    setTimeout(() => document.addEventListener('click', removeMenu), 0);
+  }
+
+  private deleteHighlight(highlight: PdfHighlight, highlightEl: HTMLElement): void {
+    // Remove from DOM
+    highlightEl.remove();
+
+    // Remove from highlights map
+    for (const [pageNumber, pageHighlights] of this.highlights.entries()) {
+      const index = pageHighlights.findIndex(h => h.id === highlight.id);
+      if (index !== -1) {
+        pageHighlights.splice(index, 1);
+        if (pageHighlights.length === 0) {
+          this.highlights.delete(pageNumber);
+        }
+        break;
+      }
+    }
+
+    // Save changes
+    this.saveHighlightsToNotes();
+  }
+
+  private async saveHighlightsToNotes(): Promise<void> {
+    if (!this.currentNotesFile) return;
+
+    try {
+      const content = await this.app.vault.read(this.currentNotesFile);
+      
+      // Create highlights data section
+      const highlightsData = JSON.stringify(Array.from(this.highlights.entries()));
+      
+      // Check if highlights section exists
+      const highlightMarker = '<!-- PDF_HIGHLIGHTS_DATA';
+      const endMarker = 'END_PDF_HIGHLIGHTS -->';
+      
+      let newContent: string;
+      if (content.includes(highlightMarker)) {
+        // Update existing highlights section
+        const regex = new RegExp(`${highlightMarker}[\\s\\S]*?${endMarker}`, 'g');
+        newContent = content.replace(regex, `${highlightMarker}\n${highlightsData}\n${endMarker}`);
+      } else {
+        // Add highlights section at the end
+        newContent = content + `\n\n${highlightMarker}\n${highlightsData}\n${endMarker}`;
+      }
+      
+      await this.app.vault.modify(this.currentNotesFile, newContent);
+    } catch (error) {
+      console.error('Error saving highlights to notes:', error);
+    }
+  }
+
+  private async loadHighlightsFromNotes(): Promise<void> {
+    if (!this.currentNotesFile) return;
+
+    try {
+      const content = await this.app.vault.read(this.currentNotesFile);
+      
+      const highlightMarker = '<!-- PDF_HIGHLIGHTS_DATA';
+      const endMarker = 'END_PDF_HIGHLIGHTS -->';
+      
+      if (content.includes(highlightMarker)) {
+        const regex = new RegExp(`${highlightMarker}\\n([\\s\\S]*?)\\n${endMarker}`);
+        const match = content.match(regex);
+        
+        if (match && match[1]) {
+          try {
+            const highlightsData = JSON.parse(match[1]);
+            this.highlights = new Map(highlightsData);
+          } catch (parseError) {
+            console.error('Error parsing highlights data:', parseError);
+            this.highlights = new Map();
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Error loading highlights from notes:', error);
+      this.highlights = new Map();
+    }
+  }
+
+  private setupAutoSave(markdownView: any): void {
+    if (this.plugin.settings.autoSaveInterval > 0 && this.currentNotesFile) {
+      // Clear existing timer
+      if (this.autoSaveTimer) {
+        clearInterval(this.autoSaveTimer);
+      }
+      
+      this.autoSaveTimer = setInterval(async () => {
+        if (this.currentNotesFile && markdownView.data !== undefined) {
+          try {
+            await this.app.vault.modify(this.currentNotesFile, markdownView.data);
+            this.showSaveIndicator();
+          } catch (error) {
+            console.error("Auto-save error:", error);
+          }
+        }
+      }, this.plugin.settings.autoSaveInterval * 1000);
+    }
+  }
+
+  private showSaveIndicator(): void {
+    if (!this.noteContainer) return;
+    
+    const indicator = this.noteContainer.createEl("div", {
+      text: "✓ Auto-saved",
+      cls: "save-indicator"
+    });
+    
+    setTimeout(() => indicator.remove(), 2000);
+  }
+
+  public async saveCurrentNotes(): Promise<void> {
+    if (!this.currentNotesFile) return;
+
+    try {
+      // Find any text areas or editors in the note container and save their content
+      const textAreas = this.noteContainer?.querySelectorAll('textarea');
+      if (textAreas && textAreas.length > 0) {
+        const content = textAreas[0].value;
+        if (content) {
+          await this.app.vault.modify(this.currentNotesFile, content);
+        }
+      }
+
+      // Also save any markdown views that might be open
+      const markdownViews = this.app.workspace.getLeavesOfType("markdown");
+      for (const leaf of markdownViews) {
+        const view = leaf.view as MarkdownView;
+        if (view.file === this.currentNotesFile) {
+          await view.save();
+        }
+      }
+    } catch (error) {
+      console.error("Error saving notes on close:", error);
+    }
+  }
+
+  async onClose(): Promise<void> {
+    // Auto-save when view is closed
+    await this.saveCurrentNotes();
+    
+    // Clear any timers
+    if (this.autoSaveTimer) {
+      clearInterval(this.autoSaveTimer);
+      this.autoSaveTimer = null;
+    }
+
+    // Clean up embedded leaf
+    if (this.embeddedLeaf) {
+      this.embeddedLeaf.detach();
+      this.embeddedLeaf = null;
+    }
+
+    // Call parent onClose
+    await super.onClose();
   }
 
   private async loadNotes(pageNumber: number): Promise<string | null> {
@@ -1122,11 +1647,32 @@ created: ${new Date().toISOString()}
       ? "block"
       : "none";
 
+    // Update all toggle buttons to reflect current state
+    this.updateToggleButtons();
+
     // Update the container layout class based on visibility
     const container = this.containerEl?.children[1] as HTMLElement;
     if (container) {
       container.style.display = "flex"; // Always keep flex display
     }
+  }
+
+  private updateToggleButtons(): void {
+    // Update PDF toggle buttons in both PDF controls and note navigation
+    const pdfToggleButtons = this.containerEl.querySelectorAll('.pdf-toggle-button');
+    pdfToggleButtons.forEach((button: HTMLElement) => {
+      if (button.textContent?.includes('PDF')) {
+        button.textContent = this.plugin.settings.showPdf ? "Hide PDF" : "Show PDF";
+      }
+    });
+
+    // Update notes toggle buttons
+    const notesToggleButtons = this.containerEl.querySelectorAll('button');
+    notesToggleButtons.forEach((button: HTMLElement) => {
+      if (button.textContent?.includes('Notes')) {
+        button.textContent = this.plugin.settings.showNotes ? "Hide Notes" : "Show Notes";
+      }
+    });
   }
 
   private async showAllNotes(): Promise<void> {
@@ -1368,6 +1914,9 @@ export default class PdfNoteAligner extends Plugin {
       (leaf) => new PdfNoteView(leaf, this)
     );
 
+    // Register extensions - mark this plugin as handling PDF files
+    this.registerExtensions(["pdf"], PDF_NOTE_VIEW_TYPE);
+
     // Add ribbon icon
     this.addRibbonIcon("document", "Open A PDF Note Viewer", async () => {
       await this.activateView();
@@ -1382,13 +1931,68 @@ export default class PdfNoteAligner extends Plugin {
               .setTitle("Open in PDF Note Viewer")
               .setIcon("document")
               .onClick(async () => {
-                const leaf = await this.activateView();
-                if (leaf) {
-                  const view = leaf.view as PdfNoteView;
-                  await view.loadPdfFromVault(file);
+                try {
+                  const leaf = await this.activateView();
+                  if (leaf) {
+                    const view = leaf.view as PdfNoteView;
+                    await view.loadPdfFromVault(file);
+                    new Notice(`Opening ${file.name} in PDF Note Viewer`);
+                  } else {
+                    new Notice("Failed to open PDF Note Viewer");
+                  }
+                } catch (error) {
+                  console.error("Error opening PDF in viewer:", error);
+                  new Notice("Error opening PDF in viewer");
                 }
               });
           });
+        }
+      })
+    );
+
+    // Alternative: Register event for editor-menu as well
+    this.registerEvent(
+      this.app.workspace.on("editor-menu", (menu, editor, view) => {
+        if (view.file && view.file.extension === "pdf") {
+          menu.addItem((item) => {
+            item
+              .setTitle("Open in PDF Note Viewer")
+              .setIcon("document")
+              .onClick(async () => {
+                try {
+                  const leaf = await this.activateView();
+                  if (leaf) {
+                    const pdfView = leaf.view as PdfNoteView;
+                    await pdfView.loadPdfFromVault(view.file as TFile);
+                    new Notice(`Opening ${view.file?.name || 'PDF'} in PDF Note Viewer`);
+                  }
+                } catch (error) {
+                  console.error("Error opening PDF in viewer:", error);
+                  new Notice("Error opening PDF in viewer");
+                }
+              });
+          });
+        }
+      })
+    );
+
+    // Register file click handler for PDFs - automatically open in plugin if setting enabled
+    this.registerEvent(
+      this.app.workspace.on("file-open", async (file) => {
+        if (file instanceof TFile && file.extension === "pdf" && this.settings.autoOpenPdfsWithNotes) {
+          // Check if this PDF has associated notes (indicating it was saved with notes)
+          const notesPath = `${file.path}-notes.md`;
+          const notesFile = this.app.vault.getAbstractFileByPath(notesPath);
+          
+          if (notesFile) {
+            // This PDF has notes, so open it in our plugin
+            const leaf = await this.activateView();
+            if (leaf) {
+              const view = leaf.view as PdfNoteView;
+              await view.loadPdfFromVault(file);
+            }
+            return false; // Prevent default PDF opening
+          }
         }
       })
     );
@@ -1398,6 +2002,13 @@ export default class PdfNoteAligner extends Plugin {
   }
 
   async onunload() {
+    // Auto-save all open PDF note views before unloading
+    const leaves = this.app.workspace.getLeavesOfType(PDF_NOTE_VIEW_TYPE);
+    for (const leaf of leaves) {
+      const view = leaf.view as PdfNoteView;
+      await view.saveCurrentNotes();
+    }
+    
     this.app.workspace.detachLeavesOfType(PDF_NOTE_VIEW_TYPE);
   }
 
@@ -1544,6 +2155,18 @@ class PdfNoteAlignerSettingTab extends PluginSettingTab {
                 leaf.view.updateTheme();
               }
             });
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Auto-open PDFs with Notes")
+      .setDesc("Automatically open PDFs that have notes in the PDF Note Viewer when clicked in file explorer")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.autoOpenPdfsWithNotes)
+          .onChange(async (value) => {
+            this.plugin.settings.autoOpenPdfsWithNotes = value;
+            await this.plugin.saveSettings();
           })
       );
 
