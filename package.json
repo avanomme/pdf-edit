@@ -28,7 +28,7 @@
     "@codemirror/state": "^6.5.1",
     "@codemirror/view": "^6.36.2",
     "builtin-modules": "^4.0.0",
-    "pdfjs-dist": "^3.11.174",
+    "pdfjs-dist": "^5.4.149",
     "tslib": "^2.8.1"
   }
 }

@@ -21,7 +21,7 @@ const copyPdfWorker = {
         "node_modules",
         "pdfjs-dist",
         "build",
-        "pdf.worker.min.js"
+        "pdf.worker.min.mjs"
       );
       const outputPath = path.join(".", "pdf.worker.min.js");
       fs.copyFileSync(workerPath, outputPath);
