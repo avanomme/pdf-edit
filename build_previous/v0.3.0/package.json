@@ -1,7 +1,7 @@
 {
-  "name": "pdf-notes",
-  "version": "1.0.1",
-  "description": "A plugin for viewing PDFs with integrated note-taking in Obsidian",
+  "name": "a-pdf-note-viewer",
+  "version": "1.0.0",
+  "description": "A plugin for viewing PDFs and taking notes in Obsidian",
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",

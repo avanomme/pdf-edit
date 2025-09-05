@@ -1,0 +1,9 @@
+{
+  "id": "a-pdf-note-viewer",
+  "name": "A PDF Note Viewer",
+  "version": "0.1.0",
+  "minAppVersion": "0.15.0",
+  "description": "A plugin for viewing PDFs and taking notes in Obsidian.",
+  "author": "Your Name",
+  "isDesktopOnly": true
+}
