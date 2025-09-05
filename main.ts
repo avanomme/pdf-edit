@@ -13,9 +13,6 @@ import {
 } from "obsidian";
 import * as pdfjsLib from "pdfjs-dist";
 
-// Import PDF.js worker
-import pdfjsWorker from "pdfjs-dist/build/pdf.worker.entry";
-
 const PDF_NOTES_VIEW_TYPE = "pdf-notes-view";
 
 interface PDFNotesSettings {
@@ -71,7 +68,7 @@ class PDFNotesView extends ItemView {
 
   async onOpen(): Promise<void> {
     // Initialize PDF.js worker
-    pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
+    pdfjsLib.GlobalWorkerOptions.workerSrc = "./pdf.worker.min.js";
 
     const container = this.containerEl.children[1];
     container.empty();
