@@ -1,7 +1,7 @@
 {
   "id": "pdf-notes",
   "name": "PDF-Notes",
-  "version": "1.0.2",
+  "version": "1.0.1",
   "minAppVersion": "0.15.0",
   "description": "A plugin for viewing PDFs with integrated note-taking in Obsidian.",
   "author": "Adam",

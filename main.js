@@ -10,6 +10,9 @@ var __getOwnPropNames = Object.getOwnPropertyNames;
 var __getProtoOf = Object.getPrototypeOf;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
 var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
+var __esm = (fn, res) => function __init() {
+  return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;
+};
 var __commonJS = (cb, mod) => function __require() {
   return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
 };
@@ -76480,6 +76483,56 @@ var require_pdf_worker_entry = __commonJS({
   }
 });
 
+// node_modules/@codemirror/basic-setup/dist/index.js
+var dist_exports = {};
+__export(dist_exports, {
+  EditorState: () => import_state2.EditorState,
+  EditorView: () => import_view2.EditorView,
+  basicSetup: () => basicSetup
+});
+var import_view, import_view2, import_state, import_state2, import_language, import_commands, import_search, import_autocomplete, import_lint, basicSetup;
+var init_dist = __esm({
+  "node_modules/@codemirror/basic-setup/dist/index.js"() {
+    import_view = require("@codemirror/view");
+    import_view2 = require("@codemirror/view");
+    import_state = require("@codemirror/state");
+    import_state2 = require("@codemirror/state");
+    import_language = require("@codemirror/language");
+    import_commands = require("@codemirror/commands");
+    import_search = require("@codemirror/search");
+    import_autocomplete = require("@codemirror/autocomplete");
+    import_lint = require("@codemirror/lint");
+    basicSetup = [
+      /* @__PURE__ */ (0, import_view.lineNumbers)(),
+      /* @__PURE__ */ (0, import_view.highlightActiveLineGutter)(),
+      /* @__PURE__ */ (0, import_view.highlightSpecialChars)(),
+      /* @__PURE__ */ (0, import_commands.history)(),
+      /* @__PURE__ */ (0, import_language.foldGutter)(),
+      /* @__PURE__ */ (0, import_view.drawSelection)(),
+      /* @__PURE__ */ (0, import_view.dropCursor)(),
+      /* @__PURE__ */ import_state.EditorState.allowMultipleSelections.of(true),
+      /* @__PURE__ */ (0, import_language.indentOnInput)(),
+      /* @__PURE__ */ (0, import_language.syntaxHighlighting)(import_language.defaultHighlightStyle, { fallback: true }),
+      /* @__PURE__ */ (0, import_language.bracketMatching)(),
+      /* @__PURE__ */ (0, import_autocomplete.closeBrackets)(),
+      /* @__PURE__ */ (0, import_autocomplete.autocompletion)(),
+      /* @__PURE__ */ (0, import_view.rectangularSelection)(),
+      /* @__PURE__ */ (0, import_view.crosshairCursor)(),
+      /* @__PURE__ */ (0, import_view.highlightActiveLine)(),
+      /* @__PURE__ */ (0, import_search.highlightSelectionMatches)(),
+      /* @__PURE__ */ import_view.keymap.of([
+        ...import_autocomplete.closeBracketsKeymap,
+        ...import_commands.defaultKeymap,
+        ...import_search.searchKeymap,
+        ...import_commands.historyKeymap,
+        ...import_language.foldKeymap,
+        ...import_autocomplete.completionKeymap,
+        ...import_lint.lintKeymap
+      ])
+    ];
+  }
+});
+
 // main.ts
 var main_exports = {};
 __export(main_exports, {
@@ -76508,6 +76561,17 @@ var PDFNotesView = class extends import_obsidian.ItemView {
     this.currentNotesFile = null;
     this.currentScale = 1;
     this.canvas = null;
+    this.pageNotes = {};
+    this.notesEditor = null;
+    this.debouncedSave = (() => {
+      let timeout;
+      return () => {
+        clearTimeout(timeout);
+        timeout = setTimeout(async () => {
+          await this.saveAllNotesToFile();
+        }, 1e3);
+      };
+    })();
     this.plugin = plugin;
   }
   getViewType() {
@@ -76656,18 +76720,18 @@ var PDFNotesView = class extends import_obsidian.ItemView {
     notesToggle.toggleClass("active", this.plugin.settings.showNotes);
   }
   setupControlHandlers(prevBtn, nextBtn, zoomOut, zoomIn, fitWidth, fitHeight, pdfToggle, notesToggle) {
-    prevBtn.addEventListener("click", () => {
+    prevBtn.addEventListener("click", async () => {
       if (this.currentPage > 1) {
         this.currentPage--;
         this.renderPage(this.currentPage);
-        this.updateNotesForPage();
+        await this.updateNotesForPage();
       }
     });
-    nextBtn.addEventListener("click", () => {
+    nextBtn.addEventListener("click", async () => {
       if (this.currentPage < this.currentPdf.numPages) {
         this.currentPage++;
         this.renderPage(this.currentPage);
-        this.updateNotesForPage();
+        await this.updateNotesForPage();
       }
     });
     zoomOut.addEventListener("click", () => {
@@ -76806,33 +76870,115 @@ var PDFNotesView = class extends import_obsidian.ItemView {
     if (!this.currentNotesFile)
       return;
     this.notesContainer.empty();
+    const pageLabel = this.notesContainer.createEl("div", {
+      cls: "pdf-notes-page-label",
+      text: `Page ${this.currentPage} Notes`
+    });
     const content = await this.app.vault.read(this.currentNotesFile);
-    const textarea = this.notesContainer.createEl("textarea", {
-      cls: "pdf-notes-editor",
-      value: content
+    this.parseExistingNotes(content);
+    const editorContainer = this.notesContainer.createEl("div", {
+      cls: "pdf-notes-editor-container"
     });
-    let saveTimeout;
-    textarea.addEventListener("input", () => {
-      clearTimeout(saveTimeout);
-      saveTimeout = setTimeout(async () => {
-        if (this.currentNotesFile) {
-          await this.app.vault.modify(this.currentNotesFile, textarea.value);
-        }
-      }, 1e3);
-    });
-    this.updateNotesForPage();
+    const currentPageContent = this.pageNotes[this.currentPage] || "";
+    await this.createMarkdownEditor(editorContainer, currentPageContent);
+    await this.updateNotesForPage();
   }
-  updateNotesForPage() {
-    const textarea = this.notesContainer.querySelector("textarea");
-    if (textarea) {
-      const pageHeader = `## Page ${this.currentPage}`;
-      const content = textarea.value;
-      const pageIndex = content.indexOf(pageHeader);
-      if (pageIndex !== -1) {
-        textarea.setSelectionRange(pageIndex, pageIndex);
-        textarea.focus();
+  async updateNotesForPage() {
+    const pageLabel = this.notesContainer.querySelector(".pdf-notes-page-label");
+    if (!this.currentNotesFile)
+      return;
+    if (pageLabel) {
+      pageLabel.textContent = `Page ${this.currentPage} Notes`;
+    }
+    this.saveCurrentPageNotes();
+    await this.loadNotesForCurrentPage();
+  }
+  saveCurrentPageNotes() {
+    if (this.notesEditor) {
+      const currentContent = this.notesEditor.state.doc.toString();
+      if (!this.pageNotes)
+        this.pageNotes = {};
+      this.pageNotes[this.currentPage] = currentContent;
+    }
+  }
+  async loadNotesForCurrentPage() {
+    var _a;
+    if (!this.notesEditor)
+      return;
+    const pageContent = ((_a = this.pageNotes) == null ? void 0 : _a[this.currentPage]) || "";
+    this.notesEditor.dispatch({
+      changes: {
+        from: 0,
+        to: this.notesEditor.state.doc.length,
+        insert: pageContent
+      }
+    });
+    this.notesEditor.focus();
+  }
+  async saveAllNotesToFile() {
+    var _a, _b, _c, _d, _e;
+    if (!this.currentNotesFile)
+      return;
+    this.saveCurrentPageNotes();
+    const pdfName = ((_a = this.currentPdfFile) == null ? void 0 : _a.basename) || "PDF";
+    let fullContent = `# ${pdfName} - Notes
+
+`;
+    fullContent += `**PDF:** [[${(_b = this.currentPdfFile) == null ? void 0 : _b.name}]]
+`;
+    fullContent += `**Total Pages:** ${((_c = this.currentPdf) == null ? void 0 : _c.numPages) || 0}
+
+`;
+    for (let page = 1; page <= (((_d = this.currentPdf) == null ? void 0 : _d.numPages) || 0); page++) {
+      fullContent += `## Page ${page}
+
+`;
+      if ((_e = this.pageNotes) == null ? void 0 : _e[page]) {
+        fullContent += this.pageNotes[page] + "\n\n";
+      } else {
+        fullContent += "_No notes for this page_\n\n";
       }
     }
+    await this.app.vault.modify(this.currentNotesFile, fullContent);
+  }
+  parseExistingNotes(content) {
+    var _a;
+    this.pageNotes = {};
+    const pageHeaders = content.split(/^## Page (\d+)$/gm);
+    for (let i = 1; i < pageHeaders.length; i += 2) {
+      const pageNumber = parseInt(pageHeaders[i]);
+      const pageContent = ((_a = pageHeaders[i + 1]) == null ? void 0 : _a.trim()) || "";
+      if (pageContent !== "_No notes for this page_") {
+        this.pageNotes[pageNumber] = pageContent;
+      }
+    }
+  }
+  async createMarkdownEditor(container, content) {
+    var _a;
+    const tempPath = `temp-page-${this.currentPage}.md`;
+    const { EditorView: EditorView2, keymap: keymap2 } = await import("@codemirror/view");
+    const { EditorState: EditorState3 } = await import("@codemirror/state");
+    const { basicSetup: basicSetup2 } = await Promise.resolve().then(() => (init_dist(), dist_exports));
+    const { defaultKeymap: defaultKeymap2, history: history2, historyKeymap: historyKeymap2 } = await import("@codemirror/commands");
+    const state = EditorState3.create({
+      doc: content,
+      extensions: [
+        basicSetup2,
+        history2(),
+        keymap2.of([...defaultKeymap2, ...historyKeymap2]),
+        EditorView2.updateListener.of((update) => {
+          if (update.docChanged) {
+            this.pageNotes[this.currentPage] = update.state.doc.toString();
+            this.debouncedSave();
+          }
+        })
+      ]
+    });
+    this.notesEditor = new EditorView2({
+      state,
+      parent: container
+    });
+    (_a = container.querySelector(".cm-editor")) == null ? void 0 : _a.addClass("pdf-notes-codemirror");
   }
   addStyles() {
     const styleId = "pdf-notes-styles";
@@ -76984,9 +77130,23 @@ var PDFNotesView = class extends import_obsidian.ItemView {
         font-style: italic;
       }
 
+      .pdf-notes-page-label {
+        background: var(--background-secondary);
+        color: var(--text-normal);
+        font-weight: 600;
+        font-size: 14px;
+        padding: 8px 16px;
+        border-bottom: 1px solid var(--background-modifier-border);
+        text-align: center;
+        min-height: 32px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
       .pdf-notes-editor {
         width: 100%;
-        height: 100%;
+        flex: 1;
         border: none;
         outline: none;
         resize: none;
@@ -76997,18 +77157,48 @@ var PDFNotesView = class extends import_obsidian.ItemView {
         background: var(--background-primary);
         color: var(--text-normal);
       }
+
+      .pdf-notes-editor-container {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        position: relative;
+      }
+
+      .pdf-notes-codemirror {
+        height: 100%;
+        font-family: var(--font-text);
+        font-size: var(--font-text-size);
+      }
+
+      .pdf-notes-codemirror .cm-editor {
+        height: 100%;
+        background: var(--background-primary);
+      }
+
+      .pdf-notes-codemirror .cm-content {
+        padding: 16px;
+        color: var(--text-normal);
+        line-height: var(--line-height-normal);
+      }
+
+      .pdf-notes-codemirror .cm-focused {
+        outline: none;
+      }
     `;
     document.head.appendChild(style);
   }
   async onClose() {
     if (this.plugin.settings.autoSaveOnClose && this.currentNotesFile) {
-      const textarea = this.notesContainer.querySelector("textarea");
-      if (textarea) {
-        await this.app.vault.modify(this.currentNotesFile, textarea.value);
-      }
+      this.saveCurrentPageNotes();
+      await this.saveAllNotesToFile();
     }
     if (this.currentPdf) {
       this.currentPdf = null;
+    }
+    if (this.notesEditor) {
+      this.notesEditor.destroy();
+      this.notesEditor = null;
     }
   }
 };

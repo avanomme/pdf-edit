@@ -1,0 +1,7 @@
+{
+  "id": "pdf-notes",
+  "name": "PDF-Notes",
+  "author": "Adam",
+  "description": "A plugin for viewing PDFs with integrated note-taking in Obsidian.",
+  "repo": "your-username/pdf_plugin"
+}

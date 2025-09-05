@@ -49,6 +49,8 @@ class PDFNotesView extends ItemView {
   private plugin: PDFNotesPlugin;
   private resizeHandle: HTMLElement;
   private canvas: HTMLCanvasElement | null = null;
+  private pageNotes: Record<number, string> = {};
+  private notesEditor: any = null;
 
   constructor(leaf: WorkspaceLeaf, plugin: PDFNotesPlugin) {
     super(leaf);
@@ -282,19 +284,19 @@ class PDFNotesView extends ItemView {
     pdfToggle: HTMLElement,
     notesToggle: HTMLElement
   ): void {
-    prevBtn.addEventListener("click", () => {
+    prevBtn.addEventListener("click", async () => {
       if (this.currentPage > 1) {
         this.currentPage--;
         this.renderPage(this.currentPage);
-        this.updateNotesForPage();
+        await this.updateNotesForPage();
       }
     });
 
-    nextBtn.addEventListener("click", () => {
+    nextBtn.addEventListener("click", async () => {
       if (this.currentPage < this.currentPdf.numPages) {
         this.currentPage++;
         this.renderPage(this.currentPage);
-        this.updateNotesForPage();
+        await this.updateNotesForPage();
       }
     });
 
@@ -444,42 +446,168 @@ class PDFNotesView extends ItemView {
 
     this.notesContainer.empty();
     
-    // Create a simple text area for now (will be enhanced to full Obsidian editor later)
+    // Add page label
+    const pageLabel = this.notesContainer.createEl("div", {
+      cls: "pdf-notes-page-label",
+      text: `Page ${this.currentPage} Notes`
+    });
+    
+    // Parse existing notes file and populate pageNotes
     const content = await this.app.vault.read(this.currentNotesFile);
-    const textarea = this.notesContainer.createEl("textarea", {
-      cls: "pdf-notes-editor",
-      value: content
+    this.parseExistingNotes(content);
+    
+    // Create editor container
+    const editorContainer = this.notesContainer.createEl("div", {
+      cls: "pdf-notes-editor-container"
     });
 
-    // Auto-save functionality
-    let saveTimeout: NodeJS.Timeout;
-    textarea.addEventListener("input", () => {
-      clearTimeout(saveTimeout);
-      saveTimeout = setTimeout(async () => {
-        if (this.currentNotesFile) {
-          await this.app.vault.modify(this.currentNotesFile, textarea.value);
-        }
-      }, 1000);
-    });
+    // Create a temporary file for the current page content
+    const currentPageContent = this.pageNotes[this.currentPage] || '';
+    
+    // Create a temporary markdown view for this page
+    await this.createMarkdownEditor(editorContainer, currentPageContent);
 
     // Navigate to current page section
-    this.updateNotesForPage();
+    await this.updateNotesForPage();
   }
 
-  private updateNotesForPage(): void {
-    // For now, just scroll to the page section
-    // TODO: Implement proper page section navigation
-    const textarea = this.notesContainer.querySelector("textarea") as HTMLTextAreaElement;
-    if (textarea) {
-      const pageHeader = `## Page ${this.currentPage}`;
-      const content = textarea.value;
-      const pageIndex = content.indexOf(pageHeader);
-      if (pageIndex !== -1) {
-        textarea.setSelectionRange(pageIndex, pageIndex);
-        textarea.focus();
+  private async updateNotesForPage(): Promise<void> {
+    const pageLabel = this.notesContainer.querySelector(".pdf-notes-page-label") as HTMLElement;
+    
+    if (!this.currentNotesFile) return;
+
+    // Update page label
+    if (pageLabel) {
+      pageLabel.textContent = `Page ${this.currentPage} Notes`;
+    }
+
+    // Save current content before switching pages
+    this.saveCurrentPageNotes();
+
+    // Load notes for the current page
+    await this.loadNotesForCurrentPage();
+  }
+
+  private saveCurrentPageNotes(): void {
+    if (this.notesEditor) {
+      const currentContent = this.notesEditor.state.doc.toString();
+      if (!this.pageNotes) this.pageNotes = {};
+      
+      // Save the current page's notes
+      this.pageNotes[this.currentPage] = currentContent;
+    }
+  }
+
+  private async loadNotesForCurrentPage(): Promise<void> {
+    if (!this.notesEditor) return;
+
+    // Load notes for current page (empty if no notes exist)
+    const pageContent = this.pageNotes?.[this.currentPage] || '';
+    
+    // Update the editor content
+    this.notesEditor.dispatch({
+      changes: {
+        from: 0,
+        to: this.notesEditor.state.doc.length,
+        insert: pageContent
+      }
+    });
+    
+    // Focus the editor
+    this.notesEditor.focus();
+  }
+
+  private async saveAllNotesToFile(): Promise<void> {
+    if (!this.currentNotesFile) return;
+
+    // Save current page before saving all
+    this.saveCurrentPageNotes();
+
+    // Compile all pages into one document
+    const pdfName = this.currentPdfFile?.basename || "PDF";
+    let fullContent = `# ${pdfName} - Notes\n\n`;
+    fullContent += `**PDF:** [[${this.currentPdfFile?.name}]]\n`;
+    fullContent += `**Total Pages:** ${this.currentPdf?.numPages || 0}\n\n`;
+
+    // Add each page's notes
+    for (let page = 1; page <= (this.currentPdf?.numPages || 0); page++) {
+      fullContent += `## Page ${page}\n\n`;
+      if (this.pageNotes?.[page]) {
+        fullContent += this.pageNotes[page] + '\n\n';
+      } else {
+        fullContent += '_No notes for this page_\n\n';
+      }
+    }
+
+    await this.app.vault.modify(this.currentNotesFile, fullContent);
+  }
+
+  private parseExistingNotes(content: string): void {
+    this.pageNotes = {};
+    
+    // Split content by page headers
+    const pageHeaders = content.split(/^## Page (\d+)$/gm);
+    
+    // First element is content before any page header (skip it)
+    for (let i = 1; i < pageHeaders.length; i += 2) {
+      const pageNumber = parseInt(pageHeaders[i]);
+      const pageContent = pageHeaders[i + 1]?.trim() || '';
+      
+      // Remove any "_No notes for this page_" placeholder text
+      if (pageContent !== '_No notes for this page_') {
+        this.pageNotes[pageNumber] = pageContent;
       }
     }
   }
+
+  private async createMarkdownEditor(container: HTMLElement, content: string): Promise<void> {
+    // Create a temporary file in memory for editing
+    const tempPath = `temp-page-${this.currentPage}.md`;
+    
+    // Create CodeMirror editor with Obsidian integration
+    const { EditorView, keymap } = await import('@codemirror/view');
+    const { EditorState } = await import('@codemirror/state');
+    const { basicSetup } = await import('@codemirror/basic-setup');
+    const { defaultKeymap, history, historyKeymap } = await import('@codemirror/commands');
+    
+    // Create editor state with basic editing support
+    const state = EditorState.create({
+      doc: content,
+      extensions: [
+        basicSetup,
+        history(),
+        keymap.of([...defaultKeymap, ...historyKeymap]),
+        EditorView.updateListener.of((update) => {
+          if (update.docChanged) {
+            // Save current page content when changed
+            this.pageNotes[this.currentPage] = update.state.doc.toString();
+            
+            // Debounced save to file
+            this.debouncedSave();
+          }
+        }),
+      ],
+    });
+
+    // Create editor view
+    this.notesEditor = new EditorView({
+      state,
+      parent: container,
+    });
+
+    // Style the editor to integrate with Obsidian
+    container.querySelector('.cm-editor')?.addClass('pdf-notes-codemirror');
+  }
+
+  private debouncedSave = (() => {
+    let timeout: NodeJS.Timeout;
+    return () => {
+      clearTimeout(timeout);
+      timeout = setTimeout(async () => {
+        await this.saveAllNotesToFile();
+      }, 1000);
+    };
+  })();
 
   private addStyles(): void {
     const styleId = "pdf-notes-styles";
@@ -631,9 +759,23 @@ class PDFNotesView extends ItemView {
         font-style: italic;
       }
 
+      .pdf-notes-page-label {
+        background: var(--background-secondary);
+        color: var(--text-normal);
+        font-weight: 600;
+        font-size: 14px;
+        padding: 8px 16px;
+        border-bottom: 1px solid var(--background-modifier-border);
+        text-align: center;
+        min-height: 32px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
       .pdf-notes-editor {
         width: 100%;
-        height: 100%;
+        flex: 1;
         border: none;
         outline: none;
         resize: none;
@@ -644,6 +786,34 @@ class PDFNotesView extends ItemView {
         background: var(--background-primary);
         color: var(--text-normal);
       }
+
+      .pdf-notes-editor-container {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        position: relative;
+      }
+
+      .pdf-notes-codemirror {
+        height: 100%;
+        font-family: var(--font-text);
+        font-size: var(--font-text-size);
+      }
+
+      .pdf-notes-codemirror .cm-editor {
+        height: 100%;
+        background: var(--background-primary);
+      }
+
+      .pdf-notes-codemirror .cm-content {
+        padding: 16px;
+        color: var(--text-normal);
+        line-height: var(--line-height-normal);
+      }
+
+      .pdf-notes-codemirror .cm-focused {
+        outline: none;
+      }
     `;
     
     document.head.appendChild(style);
@@ -652,15 +822,19 @@ class PDFNotesView extends ItemView {
   async onClose(): Promise<void> {
     // Auto-save notes if enabled
     if (this.plugin.settings.autoSaveOnClose && this.currentNotesFile) {
-      const textarea = this.notesContainer.querySelector("textarea") as HTMLTextAreaElement;
-      if (textarea) {
-        await this.app.vault.modify(this.currentNotesFile, textarea.value);
-      }
+      // Save current page notes before closing
+      this.saveCurrentPageNotes();
+      await this.saveAllNotesToFile();
     }
 
     // Cleanup
     if (this.currentPdf) {
       this.currentPdf = null;
+    }
+    
+    if (this.notesEditor) {
+      this.notesEditor.destroy();
+      this.notesEditor = null;
     }
   }
 }
