@@ -67,8 +67,9 @@ class PDFNotesView extends ItemView {
   }
 
   async onOpen(): Promise<void> {
-    // Initialize PDF.js worker
-    pdfjsLib.GlobalWorkerOptions.workerSrc = "./pdf.worker.min.js";
+    // Initialize PDF.js worker - Obsidian plugins can access their own directory
+    const pluginDir = (this as any).app.vault.adapter.path + '/.obsidian/plugins/pdf-notes';
+    pdfjsLib.GlobalWorkerOptions.workerSrc = `${pluginDir}/pdf.worker.min.js`;
 
     const container = this.containerEl.children[1];
     container.empty();

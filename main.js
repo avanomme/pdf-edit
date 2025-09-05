@@ -25111,7 +25111,8 @@ var PDFNotesView = class extends import_obsidian.ItemView {
     return "file-text";
   }
   async onOpen() {
-    GlobalWorkerOptions.workerSrc = "./pdf.worker.min.js";
+    const pluginDir = this.app.vault.adapter.path + "/.obsidian/plugins/pdf-notes";
+    GlobalWorkerOptions.workerSrc = `${pluginDir}/pdf.worker.min.js`;
     const container = this.containerEl.children[1];
     container.empty();
     container.addClass("pdf-notes-container");
